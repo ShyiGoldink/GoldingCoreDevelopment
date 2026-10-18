@@ -1,0 +1,70 @@
+
+####### Expanded from @PACKAGE_INIT@ by configure_package_config_file() #######
+####### Any changes to this file will be overwritten by the next CMake run ####
+####### The input file was inkingConfig.cmake.in                            ########
+
+get_filename_component(PACKAGE_PREFIX_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../" ABSOLUTE)
+
+macro(set_and_check _var _file)
+  set(${_var} "${_file}")
+  if(NOT EXISTS "${_file}")
+    message(FATAL_ERROR "File or directory ${_file} referenced by variable ${_var} does not exist !")
+  endif()
+endmacro()
+
+macro(check_required_components _NAME)
+  foreach(comp ${${_NAME}_FIND_COMPONENTS})
+    if(NOT ${_NAME}_${comp}_FOUND)
+      if(${_NAME}_FIND_REQUIRED_${comp})
+        set(${_NAME}_FOUND FALSE)
+      endif()
+    endif()
+  endforeach()
+endmacro()
+
+####################################################################################
+
+# inking 的 CMake 包配置：让 `find_package(inking CONFIG)` 能直接用。
+#
+# 依赖必须在这里重新 find：导出的 target 带 INTERFACE 链接项，
+# 消费方缺任何一个都会在链接期才报错，那时已经离现场很远了。
+include(CMakeFindDependencyMacro)
+
+find_dependency(SDL3 CONFIG)
+find_dependency(SDL3_image CONFIG)
+find_dependency(SDL3_ttf CONFIG)
+find_dependency(SDL3_mixer CONFIG)
+find_dependency(Threads)
+
+# FFmpeg 只有 pkg-config（没有 CMake config），所以这里走 PkgConfig 的宏。
+# `IMPORTED_TARGET` 生成的 `PkgConfig::FFMPEG` 正是导出接口引用的那个名字。
+find_dependency(PkgConfig)
+pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavcodec libavformat libavutil libswresample libswscale)
+
+include("${CMAKE_CURRENT_LIST_DIR}/inkingTargets.cmake")
+
+# ---------------------------------------------------------------------------
+# 预编译包的路径（给"用发布包、不编译源码"的人）
+#
+# 包结构是固定的：
+#   <sdk>/bin/inkgen.exe                    ← CXXCSS 生成器
+#   <sdk>/include/...                       ← 82 个公开头
+#   <sdk>/lib/cmake/inking/                 ← CMAKE_CURRENT_LIST_DIR 在这里
+#   <sdk>/examples/CXXCSS/                  ← 配置样例
+#
+# 所以 `lib/cmake/inking` 往上三级就是包根。消费方拿到这两个变量之后，
+# 就能 include 生成模块、或者把 CXXCSS 样例拷进自己的项目。
+# ---------------------------------------------------------------------------
+get_filename_component(INKING_SDK_DIR "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(INKING_INKGEN      "${INKING_SDK_DIR}/bin/inkgen.exe")
+set(INKING_CXXCSS_DIR  "${INKING_SDK_DIR}/examples/CXXCSS")
+set(INKING_INKGEN_CMAKE "${CMAKE_CURRENT_LIST_DIR}/inking-inkgen.cmake")
+
+if(NOT EXISTS "${INKING_INKGEN}")
+    message(WARNING
+        "inking: 在 ${INKING_INKGEN} 没找到 inkgen.exe。"
+        "手写组件不受影响，但 CXXCSS 生成路线（ink_add_generated）用不了。")
+endif()
+
+check_required_components(inking)
