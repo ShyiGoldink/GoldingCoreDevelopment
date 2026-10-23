@@ -256,7 +256,7 @@ HostApi 增四个函数指针：
 
 ---
 
-## 6. 搬迁到 `dev001` 的前置条件
+## 6. 搬迁到 `dev001` 的前置条件（已完成）
 
 **边界已定（2026-10-23）**：`dev001` 只承载 `golding_core` + 插件开发包，不含 `host/`、`plugins/`、
 `third_party/`。理由、代价与 `HostApp` 的归属见 `docs/Options.md` §13。
@@ -276,10 +276,16 @@ HostApi 增四个函数指针：
 | - | - | - |
 | M-1 | 插件源码支持仓库外路径 | **不做**：插件各有专属文件夹（`plugins/core/<name>/`、`plugins/dev/<name>/`），按名字拼路径就是对的 |
 | M-2 | `CMakeLists.txt` 按 core / 宿主 / 插件拆开 | **已完成**：根（只有 core + 单测）/ `host/` / `plugins/` + `cmakes/GoldingPlugin.cmake`。开发包检出即使误开 `ON` 也只打一行 STATUS 后照常构建 core |
-| M-3 | 零 UI 的最小插件样例 | **待定**：就是"只声明能力 + 在 `entry` 里注册服务、一行 InkingUIKit 都不 include"的插件。不做的话，"纯逻辑插件不被迫依赖 UI 库"只有头文件层面成立，没有活样本 |
+| M-3 | 零 UI 的最小插件样例 | **不做**（用户判定，2026-10-23）：无 UI 与有 UI 的插件只是"写的东西不一样"，core 侧没有额外分支要验证。三条现状佐证：`role` 在清单里是可选的、core 里唯一跟 UI 沾边的判断是 `HostApp.cpp` 挑 `role == "panel"`；`SlotTable::Rules::requireCreate` 默认 true 但 `RegionRegistry` 早设成 false（"纯动作条目没有 create"）；`registerWidgetClass / mountPage / mountSettingsSection` 全是宿主主动调，插件不实现就永远不被调到。真做一个只是"再抄一个目录、少写几个函数"，没有新分支可验证 |
 
 验收（已实测）：只含 `include/ src/ tests/ cmakes/ CMakeLists.txt` 的检出，
 `-DGOLDING_WITH_INKING=OFF` 与 `ON` 两种配置都 2/2；完整仓库 12/12。
+
+**搬迁已完成（2026-10-23）**：`HostApp.{h,cpp}` 先从 `host/` 挪进 core
+（`include/HostApp.h` / `src/Application/HostApp.cpp`，进 `golding_core` 源列表），
+`host/` 只剩 `main.cpp`；随后 `dev001` 上做了 `feat(dev001): 分支收窄成 core + 插件开发包`
+（移出 `host/`、`plugins/`、`third_party/`、`tools/`、`run.bat`）。这个分支从 2 个提交
+变成 3 个，`include/src/tests/cmakes/docs` 共 52 个文件。
 
 M-2 踩到的两个坑，都写在 `Options.md` §13：`golding_host` 必须用 `RUNTIME_OUTPUT_DIRECTORY`
 钉在顶层二进制目录（否则 exe 落 `build/host/`，`PathFinder` 一个插件都扫不到）；

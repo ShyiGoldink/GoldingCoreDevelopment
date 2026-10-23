@@ -152,11 +152,11 @@
 | **决定** | `dev001` 上只有 `golding_core` 静态库与插件开发包：`include/`（SDK 头 + core 头）、`src/`（14 个 cpp）、`tests/`（`core_tests` + `sdk_host_tests`，两者零 UI 依赖）、插件构建函数、`docs/`。**不含** `host/`（窗口与 InkingUIKit）、`plugins/`（10 个产品插件）、`third_party/`。 |
 | **原因** | 这个分支的用途是"给别的宿主和第三方插件一个稳定的编译面"。带上 `host/` 就等于把 InkingUIKit、SDL3、FFmpeg 一起变成 core 的依赖——`GOLDING_WITH_INKING=OFF` 那条"core 可无头自证"的性质当场作废，而那正是这个库唯一的卖点。 |
 | **代价** | `dev001` 上没有可运行的宿主：`ctest` 只有 `core`（49 项）与 `sdk_host` 两个 test，界面相关的一切只能在当前仓库里验。这是有意的取舍——`dev001` 保证"能编、能测"，当前仓库保证"能跑、能看"。 |
-| **`HostApp` 归谁** | 事实：`host/HostApp.{h,cpp}` **零 InkingUIKit 依赖**（只 include core 头 + `sdk/golding_plugin.h`），UI 相关全在 `host/main.cpp`。所以它是"位置在 `host/` 的 core 模块"，不是界面代码。倾向随 core 走（挪进 `src/Application/`），但挪动会改宿主工程的 include 路径，**留到确认后再一起做**。 |
+| **`HostApp` 归谁** | **已随 core（2026-10-23）**：`host/HostApp.{h,cpp}` 本来就零 InkingUIKit 依赖（只 include core 头 + `sdk/golding_plugin.h`），UI 相关全在 `host/main.cpp`，所以它是"位置在 `host/` 的 core 模块"。现在挪成了 `include/HostApp.h` + `src/Application/HostApp.cpp`（编进 `golding_core`），`host/` 只剩 `main.cpp`。连带影响：宿主工程的 include 路径改由 `golding_core` 的 PUBLIC include 目录提供，`#include "HostApp.h"` 写法不变。 |
 | **构建入口怎么分** | `CMakeLists.txt`（根）= **只有 core 与它的单测**，不含任何 InkingUIKit / 插件 / 宿主字样；`host/CMakeLists.txt` 只在 `GOLDING_WITH_INKING=ON` **且 `host/` 存在**时才被 `add_subdirectory`；插件清单在 `plugins/CMakeLists.txt`，规则在 `cmakes/GoldingPlugin.cmake`。开发包检出即使误开 `ON` 也只打一行 STATUS 后照常构建 core。 |
 | **M-1 插件源码在仓库外** | **不做**（2026-10-23）。插件按约定有自己专属的文件夹（`plugins/core/<name>/`、`plugins/dev/<name>/`），拿名字拼路径就是对的。真出现外部插件工程时再加参数，那时才知道它长什么样。 |
 | **M-2 拆 `CMakeLists.txt`** | **已做**（2026-10-23）：根 / `host/` / `plugins/` + `cmakes/GoldingPlugin.cmake` 四处。两处必须记住的细节：`golding_host` 用 `RUNTIME_OUTPUT_DIRECTORY` 钉在**顶层**二进制目录（否则 exe 落到 `build/host/`，`PathFinder` 按"exe 旁边的 plugin/"就一个插件都扫不到）；`golding_add_plugin` 的源码参数按**仓库根**相对写，函数里补 `CMAKE_SOURCE_DIR` 前缀。 |
-| **M-3 零 UI 插件样例** | **待定**。它就是"一个不画界面的插件"：只声明能力、在 `entry` 里注册一个服务，一行 InkingUIKit 都不 include。现在最小的例子是 `selftest`（UI 插件，200+ 行、要挂页面），`sdk_host_tests` 只测契约、不是可编译的插件工程——所以"纯逻辑插件不被迫依赖 UI 库"这句话目前只有头文件层面成立，没有活样本。 |
+| **M-3 零 UI 插件样例** | **不做**（2026-10-23）。判据是"无 UI 插件要不要额外逻辑"——答案是不需要：清单里 `role` 可选，core 唯一跟 UI 沾边的判断是挑 `role == "panel"`；`SlotTable::Rules::requireCreate` 虽然默认 true，但 `RegionRegistry` 早就设成 false（"纯动作条目没有 create"）；`registerWidgetClass / mountPage / mountSettingsSection` 全是宿主主动调。所以"纯逻辑插件不被迫依赖 UI 库"在头文件和登记表两层都已经成立，再补一个样例只是"少写几个函数"，没有新分支可验证。解除条件：真出现第三方插件照文档写不出来时，把那个具体卡点记进 `open-questions.md`。 |
 | **检查点** | 只有 `include/ src/ tests/ cmakes/ CMakeLists.txt` 的检出：`cmake ... -DGOLDING_WITH_INKING=OFF && ctest` = 2/2；即使 `ON` 也只构建 core 并 2/2（实测 2026-10-23）。 |
 
 ---

@@ -3,9 +3,10 @@
 > 给下一个对话用的。只写"事实 + 半成品 + 坑"，不写过程。
 > 状态：分支 `feature/core-layout-plugin`。
 >
-> **先读 `core-review.md` §6**——10-23 定了 `dev001` 只承载 core + 插件开发包（`Options.md` §13）。
-> 构建入口已拆成根（只有 core + 单测）/ `host/` / `plugins/` + `cmakes/GoldingPlugin.cmake`，
-> 只含 `include/ src/ tests/ cmakes/` 的检出实测 2/2。**唯一还没定的是"零 UI 插件样例"（M-3）**。
+> **先读 `core-review.md` §6**——10-23 定了 `dev001` 只承载 core + 插件开发包（`Options.md` §13），
+> 并且**已经搬完**：`HostApp` 挪进 core，`dev001` 上只剩 `include/ src/ tests/ cmakes/ docs/`。
+> 构建入口拆成根（只有 core + 单测）/ `host/` / `plugins/` + `cmakes/GoldingPlugin.cmake`。
+> M-3（零 UI 插件样例）已判定不做——无 UI 与有 UI 的区别只是写的东西不同，core 侧没有额外逻辑。
 > **先读第 8 节**——13:15 之后又做了一批，第 1~7 节的"未提交""半成品"部分已部分过时。
 > **再读第 13 节**——三张表收成一个 `SlotTable`（页 / 设置 / 区域条目共用一套规则）。
 > **然后读第 12 节**——10-23 夜最新一轮：登记表计数、`entry`/`ready` 兜底（含做不到的边界），
