@@ -32,7 +32,10 @@
 | `PluginLoader` | dll：descriptor → ABI 检查 → entry |
 | `Assembler` | Manifest → 组件树（只调 `AddChild`） |
 
-两张表：`PluginRegistry`（名字 → 模板或工厂）、`ActionLibrary`（名字 → `std::function`）
+六张登记表（写法一致：静态类 + 函数内静态量 + 同名驳回）：
+`PluginRegistry`（组件类）· `PageRegistry`（页面）· `SettingsRegistry`（设置区块）·
+`RegionRegistry`（区域与区域项）· `ServiceRegistry`（服务 vtable）·
+`CapabilityRegistry`（**能力目录**：声明面 + 运行时面，服务表是它的存储后端）
 
 ## 3. 插件文件夹
 
@@ -41,21 +44,82 @@ plugin/<name>/
 ├─ plugin.json      必需
 ├─ bin/<name>.dll   可选
 ├─ icon.png         可选
-└─ assets/          可选
+├─ assets/          可选
+└─ <插件自己的数据>  可选（如 magic/magic.json：谁的数据谁解释，core 只给目录）
 ```
 
-`plugin.json` 必需字段：`name` `title` `version` `apiVersion` `abiVersion` `requires.plugins`
-可选：`widgets{}`（纯数据）、`targets{win64:{lib}}`（dll）
+`plugin.json` 必需字段：`name` `title` `version` `apiVersion` `requires.plugins`
+可选：`role`（`panel` = 面板插件，提供界面骨架）、`targets{win64:{lib}}`（dll）
+顶层键是**白名单**：写了别的键判 `Invalid`，原因会打进启动日志（`↳ <目录>：未知字段 xxx`）
+
+`apiVersion` 是**整数**（插件用到的最小 core 能力版本，单调递增）。宿主在 SDK 里
+声明自己支持到几（`GOLDING_CORE_API_VERSION`），插件声明高于它就拒绝加载并说明当前支持到几。
+
+**插件分两层，目录即事实**：`plugin/core/<name>/` 是随宿主分发的内置插件，
+`plugin/<name>/` 是外部安装的。宿主先找内置的面板插件，找不到才退到外部。
+
+**ABI 版本不写在 `plugin.json` 里**：唯一来源是 dll 导出的 `golding_plugin_descriptor().abiVersion`。
+同一事实写两处必然对不上——此前 8 个插件里有 6 个 json 还写着旧版本，而没有任何代码会发现。
 
 ## 4. dll 的两个导出符号——顺序不能反
 
-```cpp
-① const InkPluginDescriptor* inking_plugin_descriptor();   // 纯 C POD，含 abiVersion
-② int inking_plugin_entry(inking::PluginRegistry&);        // C++ 入口
+```c
+① const GoldingPluginDescriptor* golding_plugin_descriptor(void);  // 纯 C POD，含 abiVersion
+② int golding_plugin_entry(const GoldingHostApi* hostApi);         // 只吃函数指针表
 ```
 
 **先读 ① 比对 ABI，不匹配就拒绝，绝不调 ②。**
 不这么做，ABI 不对的表现是**崩溃**，不是报错。
+
+descriptor 的字段（ABI v9）与三道闸门，**顺序不能换**：
+
+| 字段 | 管什么 | 不匹配时 |
+| --- | --- | --- |
+| `abiVersion` | 二进制布局（结构体 / 函数表顺序） | 拒绝（`state=3`）。**必须第一个查**——不对时后面那些指针本身就不可信 |
+| `sdkId` | 给**哪套 SDK** 编的（`"golding"`） | 拒绝（`state=8`），日志点名期望与实际 |
+| `sdkVersion` | 那套 SDK 的版本（`"0.2.0"`） | **只记不拒**（编译栈未定，见 `docs/Options.md` §1） |
+| `manifest()` | 静态能力宣言：`kind` / `depends` / `provides` / `needs` | 装配**之前**就能读到，所以"缺能力"能在 entry 前判出来 |
+
+`plugin.json` 的 `apiVersion`（整数）是第四个数：插件用到的最小 core 能力版本，
+高于宿主即拒（`state=7`）。四个号各有分工，别想着合并。
+
+跨 dll 边界只允许 C 的 POD 与 `void*` 句柄，**不接受任何 C++ 类型**
+（`std::string` / 容器 / 引用都不行）——否则宿主与插件必须完全同 ABI，
+Debug/Release 混编就会在传容器的第一行崩掉。
+
+宿主给插件的服务表（`GoldingHostApi`）：
+
+| 项 | 用途 |
+| --- | --- |
+| `log` | 写日志 |
+| `registerWidgetClass` | 登记一个组件类型（名字 → create） |
+| `registerPage` | 登记一个内容页（id / 标题 / 顺序 / create） |
+| `pageCount` / `pageAt` | 骨架插件据此生成导航 |
+| `mountPage` | 把某个页面装进容器 |
+| `registerSettingsSection` / `settingsSectionAt` / `mountSettingsSection` | 插件往"设置"里加区块 |
+| `pluginCount` / `pluginAt` | 只读插件档案（魔法阵用它画图） |
+| `registerRegion` / `regionCount` / `regionAt` | **面板插件**声明"本机有哪些地方可以注册"，并枚举出来 |
+| `registerRegionItem` / `regionItemCount` / `regionItemAt` | 任意插件往某个区域放一项；面板插件取出来渲染 |
+| `uiRoot` | **装配后**的界面根（v8，自检插件用它断言"根铺满 / 每页装得上"） |
+| `bootMode` | 宿主的启动模式串原样交出（`--expanded` 是什么意思只有面板自己知道） |
+| `pluginDir` | 某个插件被扫描到的**目录**（v10，绝对路径 / UTF-8）；只给"读自己带的数据文件"用 |
+
+`plugin.json` 里声明的相对路径（`targets.win64.lib`）由 core 读完就解析成
+绝对路径，写成绝对路径或用 `..` 逃出去会判 `manifest` 不合法——所以消费者不必知道基准目录是谁。
+`pluginDir` 补的是另一半：**没写在 json 里、但插件自己要读的文件**（`magic.json` 这类）。
+
+descriptor 上还有一个 `ready` 回调（v8）：**装配之后**再调每个插件一次，返回失败项数。
+自检就挂在那儿——`entry` 太早（那时连窗口都没有）。宿主**不再**提供"请求整树重建"
+的入口（v7 删掉）：界面怎么变由界面自己决定（抽屉就地改宽、覆盖层就地显隐、换肤靠
+主题版本号自动重查）。
+
+**区域契约**是"换面板插件 = 换一套 UI"的落点：core 不认识 `menubar` 或任何具体区域名，
+只负责存表、查表、同名驳回。面板插件声明什么，本机就能在哪儿扩展；换个面板插件，
+可注册位置的集合就整个换掉，宿主一个字节不动。往不存在的区域注册会被驳回，
+但**不影响该插件其余注册**——面板缺席时其它插件照常工作。
+
+**页面契约**是这套骨架的关键：core 插件（Shell）不认识任何具体页面，
+抽屉里的入口全部来自页面表。新增一个页面插件，宿主和 Shell 都不用重编。
 
 ## 5. 加载三阶段
 
