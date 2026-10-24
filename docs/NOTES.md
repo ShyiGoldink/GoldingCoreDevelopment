@@ -82,6 +82,26 @@
 **（侧栏动态档的两条纪律）** 不要声明 `OwnsSubtreeHit()`（子孙不进命中表，条目点不到）；
 `HitTest` 要自己答"点在不在我这块矩形上"，否则容器在命中上是个透明洞。
 
+**`InkingFixedPopup` 的描边其实画不出来。** 它在 `.cpp` 里实现了 `onRenderDecoration`
+（描边走装饰遍），但**没有重写 `HasRenderDecoration()`**——那个默认返回 false，场景因此
+从不把它放进装饰栈。表现是"白卡片只有一条底部阴影、没有边框"，在白内容区上等于没有浮层。
+派生一层、补 `bool HasRenderDecoration() const noexcept override { return true; }` 即好。
+（这是 0.5.0 的实测结论；库侧修法是给 `InkingFixedPopup` 补同一个覆盖。）
+
+**两个 `InkingFixedPopup` 并存会互相踢掉。** 每个浮窗的"点外部关闭"判的是**自己**的
+`HitTest`：点子菜单（在父菜单矩形之外）时，父菜单同一帧收到 `anyDownEdge && !hovered`
+就自我关闭。焦点同理——基类会在每次指针变化时把焦点抢回自己。所以多层级菜单**不能**
+靠叠加现成浮窗：要么关掉这两个自动行为、由外层统一仲裁（我们的做法），要么等库出原生
+子菜单。这也是 `prefab::MenuPopup` 第一版"不做子菜单"的真实原因。
+
+**多层级浮窗的 z 必须逐层递增。** `InkingFixedPopup::AddItem` 把项抬到"本容器 z + 1"，
+如果所有层用同一个 z，父层的项（z+1）会盖住子层容器（z）——几何全对、`QueryHit` 也对，
+就是视觉上"新开的菜单被旧菜单的项切断"。我们按 `260 + 层号 × 10` 给。
+
+**菜单声明的生命周期**：`golding.menu` 的 `MenuDecl` 只需要在 `open` 调用期间有效——
+面板打开那一刻把整棵树**深拷贝**进自己的表。所以插件可以现场拼栈上的 `std::vector`
+（"设置区块装配后才有"这类动态内容就是这么来的），open 返回后就能扔。
+
 **路径一律用 UTF-8。** 别用 `path.string()`（MinGW 下按 "C" locale 解码，中文路径抛
 `Illegal byte sequence`），也别用 `path(std::string)`（那是 ANSI）。用 `PathFinder::toUtf8` /
 `fromUtf8`。

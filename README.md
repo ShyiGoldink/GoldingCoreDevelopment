@@ -156,6 +156,7 @@ golding_add_plugin(hello plugins/dev/hello/src/HelloPlugin.cpp dev)
 | `sidebar` 区域 | 同上，`regionId` 写 `"sidebar"`；条目自动拉满侧栏宽度 |
 | 右侧内容区 | 注册 `GoldingPageDecl`；用服务 `golding.navigation` 的 `go(pageId)` 切页 |
 | 弹窗 | 服务 `golding.popup`：`push(&decl)` / `pop()`，`GoldingPopupDecl` 见 `plugins/common/GoldingServices.h` |
+| 多层级菜单 | 服务 `golding.menu`：`open("my.entry", &decl)` 在自己的顶栏按钮下面弹一级，`children` 非空的项再往下开一层 |
 
 两条约定：
 
@@ -168,26 +169,71 @@ golding_add_plugin(hello plugins/dev/hello/src/HelloPlugin.cpp dev)
 
 弹窗是**模态**的：遮罩盖住整个窗口（含顶栏），点遮罩或调 `pop()` 关闭，同一时刻只有一层。
 
+### 多层级菜单（`golding.menu`）
+
+菜单层级归**面板插件**，不归库的 `prefab::MenuPopup`：那个第一版明确不做子菜单，
+而且两个 `InkingFixedPopup` 并存时会互相当作"点外部"（各自判自己的命中）、还会互相
+抢键盘焦点——父菜单在点开子菜单的同一帧就自我关闭。所以浮窗只当画框，层级、落位、
+关闭仲裁都在面板里（`plugins/common/GoldingMenu.h` 是契约）。
+
+```cpp
+golding::MenuItem recent[] = {
+    { "recent.a", "最近文件 A", nullptr, 0, &onItem },
+};
+golding::MenuItem file[] = {
+    { "file.new",    "新建",     nullptr, 0, &onItem },
+    { "file.recent", "最近打开", recent,  1, nullptr },   // children 非空 = 入口
+};
+golding::MenuItem root[] = {
+    { "menu.file", "文件", file, 2, nullptr },
+};
+golding::MenuDecl decl{ "my.menu", root, 1 };
+
+golding::MenuService* menu = host.Use<golding::MenuService>(golding::kMenuServiceName, 1);
+menu->open(nullptr, "my.entry", &decl);   // 在「我的入口」下面展开
+```
+
+四条要点：
+
+- **锚点是区域项 id，不是坐标**：面板才知道那个按钮在哪儿，插件只交身份。
+- **声明只需在 `open` 调用期间有效**：面板打开那一刻把整棵树深拷贝进自己的表，
+  所以菜单内容可以现场拼（比如"设置区块是装配后才有的"那种动态列表）。
+- **回调带 `itemId`**：`void (*)(void* hostContext, const char* itemId)`，
+  一个静态函数就能服务所有项（按 id 分派），不必为每项造一个函数指针。
+- 关闭规则：点空白 / 点叶子收起整串；点已展开的项切分支时，更深的层先收。
+
 **侧栏收拉**：顶栏最左的 `≡` 切换；收起是宽度归 0（内容区吃满整个宽度），
 不是"藏起来但仍占位"——布局求解器不跳过不可见项。想让程序一启动就收着，用
 `golding_host.exe --collapsed`（`--collapsed` 由面板自己解释，宿主管不着）。
 
 **配色**：白窗口 / 白内容区 / 承载面（浅灰紫）侧栏，顶栏下一条 1px 分隔线；
-页面是白底卡片时靠层次与分隔线区分，不靠整块换色。
+页面是白底卡片时靠层次与分隔线区分，不靠整块换色。菜单浮窗是"白卡片 + 1px 描边 +
+一层阴影"：内容区是纯白，没有这两样它就会糊在背景里。
 
 ### 设置入口（`settings` 插件）
 
 `plugins/core/settings` 是**普通插件**（不是面板）：往 `menubar` 注册一项「设置」，
-点开弹出一个对话框，把**所有注册过的设置区块**列出来。
+点开是一串**定点浮窗菜单**（每项对应一个已注册的设置区块），点某一项才弹模态框，
+并且**只显示那一块**。
 
 它不认识任何具体设置项——加一个设置项只要自己的插件调 `host.AddSettingsSection(...)`，
-这里不用改。它自己带的只有标题、空态文案和一个关闭按钮。
+这里不用改。面板支持菜单时走浮窗，不支持时自动退回"直接弹完整设置框"。
 
-两条清单里的声明值得照抄：
+它还提供 `golding.settings` 服务，让**别的插件用自己的按钮复用这份内容**：
+
+```cpp
+const golding::SettingsService* settings =
+    host.Use<golding::SettingsService>(golding::kSettingsServiceName, 1);
+settings->openMenuAt(nullptr, "my.entry");   // 在「我的入口」下面弹设置菜单
+settings->openAll(nullptr);                  // 或者直接弹完整设置框
+settings->openSection(nullptr, "my.section");// 或者只弹某一块
+```
+
+依赖它的插件在 `plugin.json` 里这样写：
 
 ```json
-"requires": { "plugins": ["GoldingGamestoryShell"] },
-"needs": { "golding.popup": 1 }
+"requires": { "plugins": ["settings"] },
+"needs": { "golding.settings": 1 }
 ```
 
 `requires` 保证面板先 entry（区域项要求**区域已经存在**，否则注册被驳回）；
