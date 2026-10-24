@@ -12,6 +12,21 @@
 cmake -S . -B build-dev -G Ninja -DGOLDING_WITH_INKING=OFF -DCMAKE_BUILD_TYPE=Release
 cmake --build build-dev
 ctest --test-dir build-dev --output-on-failure      # 2 项
+
+# 完整程序：core + 宿主 exe（要 InkingUIKit 预编译包）
+cmake -S . -B build -G Ninja -DGOLDING_WITH_INKING=ON -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="C:/msys64/ucrt64"
+cmake --build build
+ctest --test-dir build --output-on-failure          # 5 项
+```
+
+宿主 exe 只认**窗口层**的开关，界面层的模式原样经 `bootMode` 交给插件。
+**不给 `--frames` 就常驻**——"跑 N 帧就退"是 CI 与截图的行为，不是默认行为：
+
+```bash
+build/golding_host.exe                              # 开窗常驻；ESC / 关窗退出
+build/golding_host.exe --fullscreen --expanded      # 全屏；--expanded 由插件解释
+build/golding_host.exe --frames=3 --capture=shot.png   # 跑完就退，退出码即信号
 ```
 
 调试构建用 `-DCMAKE_BUILD_TYPE=Debug`。
@@ -21,10 +36,13 @@ ctest --test-dir build-dev --output-on-failure      # 2 项
 | 场景 | 目录 | 开关 | 产物 |
 | --- | --- | --- | --- |
 | 只做 core / 写插件 | `build-dev` | `OFF` | `libgolding_core.a` + 两个测试 |
-| 跑完整程序（有 `host/` 的检出） | `build` | `ON` + `-DCMAKE_PREFIX_PATH=<msys2 根>` | `golding_host.exe` + `plugin/` |
+| 跑完整程序 | `build` | `ON` + `-DCMAKE_PREFIX_PATH=<msys2 根>` | `golding_host.exe` + `plugin/` |
 
 `build` 里的 `plugin/` 是运行时装配物，`build-dev` 不产出它。混用会让 `PathFinder`
 扫到上一轮的旧插件。
+
+InkingUIKit 的预编译包按候选表定位（`-DGOLDING_INKING_DIR=<包根>` 显式指定优先），
+见 `host/CMakeLists.txt` 顶部。**必须用 MinGW 工具链**：该包是 MinGW ABI，MSVC 链不上。
 
 ## 把 core 接进你的宿主
 
@@ -127,6 +145,53 @@ golding_add_plugin(hello plugins/dev/hello/src/HelloPlugin.cpp dev)
 ```
 
 函数会编译出 `hello.dll`，连同 `plugin.json` 装到 `build/plugin/core/hello/`。
+
+## 内置面板插件：GoldingGamestoryShell
+
+`role: "panel"`，**无插件依赖**。它只提供"地方"，内容全由别的插件填：
+
+| 提供物 | 怎么用 |
+| --- | --- |
+| `menubar` 区域 | `host.AddRegionItem({ "menubar", "my.entry", "我的入口", nullptr, 10, nullptr, &onClick })` |
+| `sidebar` 区域 | 同上，`regionId` 写 `"sidebar"`；条目自动拉满侧栏宽度 |
+| 右侧内容区 | 注册 `GoldingPageDecl`；用服务 `golding.navigation` 的 `go(pageId)` 切页 |
+| 弹窗 | 服务 `golding.popup`：`push(&decl)` / `pop()`，`GoldingPopupDecl` 见 `plugins/common/GoldingServices.h` |
+
+两条约定：
+
+- 区域项有两种形态——**只填 `onActivate`** 就是一个按钮；**填 `create`** 就自己画，
+  `parent` 由面板给（顶栏里 `create` 出来的项排在菜单栏右侧按钮之前之外的位置，
+  要精确控制位置就用按钮形态）。
+- 侧栏**不自动列页面**：页面是"内容"，侧栏是"入口"。哪个页面需要入口，由那个插件
+  自己往 `sidebar` 注册一项（`onActivate` 里调导航服务即可）。这样"有哪些页"与
+  "哪儿有入口"不会变成两份互相追的清单。
+
+弹窗是**模态**的：遮罩盖住整个窗口（含顶栏），点遮罩或调 `pop()` 关闭，同一时刻只有一层。
+
+**侧栏收拉**：顶栏最左的 `≡` 切换；收起是宽度归 0（内容区吃满整个宽度），
+不是"藏起来但仍占位"——布局求解器不跳过不可见项。想让程序一启动就收着，用
+`golding_host.exe --collapsed`（`--collapsed` 由面板自己解释，宿主管不着）。
+
+**配色**：白窗口 / 白内容区 / 承载面（浅灰紫）侧栏，顶栏下一条 1px 分隔线；
+页面是白底卡片时靠层次与分隔线区分，不靠整块换色。
+
+### 设置入口（`settings` 插件）
+
+`plugins/core/settings` 是**普通插件**（不是面板）：往 `menubar` 注册一项「设置」，
+点开弹出一个对话框，把**所有注册过的设置区块**列出来。
+
+它不认识任何具体设置项——加一个设置项只要自己的插件调 `host.AddSettingsSection(...)`，
+这里不用改。它自己带的只有标题、空态文案和一个关闭按钮。
+
+两条清单里的声明值得照抄：
+
+```json
+"requires": { "plugins": ["GoldingGamestoryShell"] },
+"needs": { "golding.popup": 1 }
+```
+
+`requires` 保证面板先 entry（区域项要求**区域已经存在**，否则注册被驳回）；
+`needs` 让"面板不在"在装配前就能判出来，而不是运行时才发现拿不到服务。
 
 ## 文档
 
