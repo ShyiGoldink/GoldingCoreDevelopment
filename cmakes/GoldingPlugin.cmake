@@ -31,6 +31,11 @@ function(golding_add_plugin name source)
     set(runtime_dir "${CMAKE_BINARY_DIR}/plugin/core/${name}")
     add_dependencies(golding_host ${name})
 
+    # `plugin.json` 是 POST_BUILD 拷的，而 POST_BUILD 只在**目标真的重链接**时跑。
+    # 不把 json 记成链接依赖，就会出现"改了 manifest 却毫无反应"——运行的是上一份，
+    # 而且没有任何提示（`provides` / `needs` / `role` 都栽在这上面）。
+    set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS "${source_dir}/plugin.json")
+
     add_custom_command(TARGET ${name} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${runtime_dir}/bin"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

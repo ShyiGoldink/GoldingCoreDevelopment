@@ -1,0 +1,11 @@
+{
+  "name": "settings",
+  "title": "设置",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "requires": { "plugins": ["GoldingGamestoryShell"] },
+  "needs": { "golding.popup": 1 },
+  "targets": {
+    "win64": { "lib": "bin/settings.dll" }
+  }
+}

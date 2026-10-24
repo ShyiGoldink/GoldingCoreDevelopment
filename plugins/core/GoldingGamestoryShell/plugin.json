@@ -1,0 +1,15 @@
+{
+  "name": "GoldingGamestoryShell",
+  "title": "Golding 游戏故事 Shell",
+  "version": "0.1.0",
+  "apiVersion": 2,
+  "role": "panel",
+  "requires": { "plugins": [] },
+  "provides": {
+    "golding.navigation": 1,
+    "golding.popup": 1
+  },
+  "targets": {
+    "win64": { "lib": "bin/GoldingGamestoryShell.dll" }
+  }
+}

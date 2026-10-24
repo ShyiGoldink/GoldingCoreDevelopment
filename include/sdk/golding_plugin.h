@@ -436,11 +436,12 @@ typedef int (*GoldingPluginEntryFn)(const GoldingHostApi* hostApi, const char* p
  *
  * @code
  * extern "C" GOLDING_PLUGIN_EXPORT const GoldingPluginDescriptor* golding_plugin_descriptor(void);
- * extern "C" GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi);
+ * extern "C" GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi,
+ *                                                           const char* pluginName);
  * @endcode
  */
 GOLDING_PLUGIN_EXPORT const GoldingPluginDescriptor* golding_plugin_descriptor(void);
-GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi);
+GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi, const char* pluginName);
 
 #ifdef __cplusplus
 }
