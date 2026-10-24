@@ -1,3 +1,4 @@
+#include "GoldingMenu.h"
 #include "GoldingServices.h"
 
 #include <sdk/GoldingPlugin.h>
@@ -6,20 +7,25 @@
 #include <button/InkingStaticButton.h>
 #include <config/window_config.h>
 #include <dataStruct/InkingAnchorData.h>
+#include <dataStruct/InkingDecoration.h>
 #include <dataStruct/InkingTextLayout.h>
+#include <panel/InkingFixedPopup.h>
 #include <panel/InkingStaticPanel.h>
 #include <prefab/MenuBar.h>
 #include <prefab/MenuBarData.h>
 #include <prefab/PrefabTheme.h>
 #include <render/InkingDraw.h>
+#include <scene/InkingScene.h>
 #include <text/InkingStaticLabel.h>
 #include <widget/InkingDynamicWidget.h>
 #include <window/InkingWindow.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // GoldingGamestoryShell —— 面板插件（`role: "panel"`），**无插件依赖**。
@@ -128,6 +134,13 @@ struct ShellParts
     InkingStaticPanel* popup = nullptr;
     const golding::GoldingPopupDecl* popupDecl = nullptr;
     bool popupOpen = false;
+    /**
+     * 顶栏区域项 id → 它自己那个节点。
+     *
+     * 菜单服务拿到的锚点是"区域项 id"而不是坐标（见 `GoldingMenu.h`），
+     * 所以这里必须留下指针。只收顶栏——侧栏项眼下没有菜单入口。
+     */
+    std::map<std::string, inking::InkingWidget*> barItems;
 };
 
 std::shared_ptr<ShellParts> g_parts;
@@ -199,29 +212,478 @@ ButtonData makeSidebarItem(const char* name)
 
 void closePopup();
 
-/** 把一项挂进区域容器：填了 `create` 就交给插件自己画，否则按 `title` 造一个按钮。 */
-void placeRegionItem(const GoldingRegionItemDecl* item, inking::InkingWidget* container,
-                     const ButtonData& look, bool useMenuBar)
+// ---------------------------------------------------------------------------
+// 多层级菜单（`golding.menu`）：一串定点浮窗
+// ---------------------------------------------------------------------------
+//
+// 为什么不用现成的 `prefab::MenuPopup`：它第一版**明确不做子菜单**（头文件原话），
+// 而且两个 `InkingFixedPopup` 并存时会互相当作"点外部"——各自判自己的 `HitTest`，
+// 父菜单会在点开子菜单的同一帧自我关闭；焦点也会被基类的"取回"逻辑来回抢。
+//
+// 所以层级、落位、关闭仲裁全部落在本插件里，浮窗只当"画框 + 吃点击"的容器：
+// 关掉它的两个自动行为（`SetCloseOnOutsideClick(false)` / `SetTakeFocusOnOpen(false)`），
+// 统一由 `MenuStack` 判"这一点落在哪一层"。
+//
+// 一层的生命周期：懒创建（`EnsureLayer`）→ 重建内容（`BuildLevel`）→ 打开
+// （`OpenAt`）。关闭只 `SetVisible(false)`，**不销毁节点**——菜单项的点击回调
+// 就在那个按钮的派发栈里，当场 `RemoveChild` 会把正在派发的按钮删掉。
+
+constexpr int kMenuMaxLayers = 4;
+constexpr int kMenuItemWidth = 200;
+constexpr int kMenuItemHeight = 34;
+constexpr int kMenuPadding = 6;
+constexpr int kMenuGap = 2;
+/** 压过顶栏（100/101）与窗口按钮（200），低于弹窗遮罩（300）。 */
+constexpr int kMenuBaseZ = 260;
+/** 每深一层抬一档：否则父层容器里的项（z+1）会盖住子层容器。 */
+constexpr int kMenuLayerZStep = 10;
+
+/** 深拷贝进本插件自己表里的一项（声明只需要在 `open` 调用期间有效）。 */
+struct MenuNode
+{
+    std::string id;
+    std::string label;
+    void (*onActivate)(void*, const char*) = nullptr;
+    int childBase = -1;
+    int childCount = 0;
+};
+
+struct MenuStack;
+
+class MenuLayer final : public inking::InkingFixedPopup
+{
+public:
+    MenuLayer(inking::InkingWidget* parent, MenuStack* stack, int level);
+
+    void ClearRows();
+    void AddRow(std::unique_ptr<InkingStaticButton> row);
+    InkingStaticButton* RowAt(int index) const;
+
+    bool ContainsPoint(float x, float y) const { return HitTest(x, y); }
+    int Level() const noexcept { return _level; }
+
+    /**
+     * 基类没重写这条（`InkingFixedPopup.cpp` 里的描边实现因此永远没人调），
+     * 不补的话浮窗在白底上只剩一条阴影——看起来像"没有背景"。
+     */
+    bool HasRenderDecoration() const noexcept override { return true; }
+
+protected:
+    // **完全接管**基类的指针行为：基类那两条（点外部自动关 / 打开时抢焦点）
+    // 在多层级下都会误伤兄弟层（见上面那段注释）。
+    void onPointerStateChanged() override;
+
+private:
+    MenuStack* _stack = nullptr;
+    int _level = 0;
+    std::vector<InkingStaticButton*> _rows;
+};
+
+/** 菜单栈：所有层归它管，`open` / `close` / 点外仲裁都从这里进。 */
+struct MenuStack
+{
+    inking::InkingStaticPanel* root = nullptr;
+    bool open = false;
+    std::vector<std::unique_ptr<MenuLayer>> layers;
+    /** 每次 `open` 重建；所有层的项都住在这里（按层连续的一段）。 */
+    std::vector<MenuNode> nodes;
+
+    int Ingest(const golding::MenuItem* items, int count);
+    MenuLayer* EnsureLayer(int level);
+    void BuildLevel(int level, int base, int count, float anchorX, float anchorY);
+    void Open(int base, int count, float anchorX, float anchorY);
+    void CloseAll();
+    void CloseAbove(int level);
+    void Activate(int level, int nodeIndex, int rowIndex);
+    void HandlePointerChanged(MenuLayer* self);
+    bool AnyLayerContains(float x, float y) const;
+};
+
+MenuStack g_menu;
+
+PanelData makeMenuLayerData(int level)
+{
+    PanelData data;
+    data.name = "GoldingGamestoryShell.menu." + std::to_string(level);
+    data.width = kMenuItemWidth + kMenuPadding * 2;
+    data.height = kMenuPadding * 2; // 空菜单的最小高度；有项时 BuildLevel 用 Resize 重算
+    data.closed.color = theme::kSurface;
+    data.closed.themeColor = "panelSurface";
+    // 1px 描边 + 一层柔和阴影：**白底上的白卡片只能靠这两样站住**。
+    // 阴影比 `MenuPopupStyle` 的默认值更实一点（0x33→0x4D、6→8px）：我们的内容区
+    // 是纯白（菜单浮窗惯例是浅紫灰场景底），照抄默认值会淡得看不出浮层。
+    data.closed.stroke.width = 1.0f;
+    data.closed.stroke.color = theme::kOutline;
+    data.closed.shadow = inking::ShadowSpec{0.0f, 8.0f, 0x4D000000u};
+    data.open = data.closed;
+    data.zIndex = kMenuBaseZ + level * kMenuLayerZStep;
+    data.shape = inking::ShapeSpec::RoundedRect(12.0f);
+    data.layout.kind = inking::LayoutKind::Stack;
+    data.layout.axis = inking::LayoutAxis::Vertical;
+    data.layout.gap = static_cast<float>(kMenuGap);
+    data.layout.padding = inking::LayoutSpacing{static_cast<float>(kMenuPadding),
+                                                static_cast<float>(kMenuPadding),
+                                                static_cast<float>(kMenuPadding),
+                                                static_cast<float>(kMenuPadding)};
+    data.layout.align = inking::LayoutAlign::Stretch;
+    return data;
+}
+
+ButtonData makeMenuRowButton()
+{
+    ButtonData data;
+    data.width = kMenuItemWidth;
+    data.height = kMenuItemHeight;
+    data.normal.type = inking::AppearanceType::Color;
+    data.normal.color = theme::kSurface;
+    data.normal.themeColor = "panelSurface";
+    data.hover.type = inking::AppearanceType::Color;
+    data.hover.color = theme::kAccentSoft;
+    data.onclicked.type = inking::AppearanceType::Color;
+    data.onclicked.color = theme::kAccentSoftPressed;
+    data.hoverInheritsNormal = false;
+    data.onclickedInheritsNormal = false;
+    data.textColor = theme::kTextPrimary;
+    data.text.fontSize = 15.0f;
+    data.text.align = inking::TextAlignH::Left;
+    data.text.alignV = inking::TextAlignV::Middle;
+    data.text.leftSpace = 12.0f;
+    data.shape = inking::ShapeSpec::RoundedRect(8.0f);
+    return data;
+}
+
+MenuLayer::MenuLayer(inking::InkingWidget* parent, MenuStack* stack, int level)
+    : inking::InkingFixedPopup(parent, makeMenuLayerData(level)), _stack(stack), _level(level)
+{
+    // 多层级的前提：关闭与焦点由 `MenuStack` 统一仲裁，浮窗自己别抢。
+    SetCloseOnOutsideClick(false);
+    SetTakeFocusOnOpen(false);
+}
+
+void MenuLayer::ClearRows()
+{
+    for (InkingStaticButton* row : _rows)
+    {
+        if (row != nullptr)
+        {
+            RemoveChild(row);
+        }
+    }
+    _rows.clear();
+}
+
+void MenuLayer::AddRow(std::unique_ptr<InkingStaticButton> row)
+{
+    if (row == nullptr)
+    {
+        return;
+    }
+    InkingStaticButton* raw = row.get();
+    if (inking::InkingFixedPopup::AddItem(std::move(row)) != nullptr)
+    {
+        _rows.push_back(raw);
+    }
+}
+
+InkingStaticButton* MenuLayer::RowAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(_rows.size()))
+    {
+        return nullptr;
+    }
+    return _rows[static_cast<std::size_t>(index)];
+}
+
+void MenuLayer::onPointerStateChanged()
+{
+    if (_stack == nullptr || !IsOpen())
+    {
+        return;
+    }
+    _stack->HandlePointerChanged(this);
+}
+
+int MenuStack::Ingest(const golding::MenuItem* items, int count)
+{
+    if (items == nullptr || count <= 0)
+    {
+        return -1;
+    }
+
+    std::vector<MenuNode> built;
+    built.reserve(static_cast<std::size_t>(count));
+    for (int index = 0; index < count; ++index)
+    {
+        const golding::MenuItem& item = items[index];
+        if (item.label == nullptr || item.label[0] == '\0')
+        {
+            continue; // 空文字的项不画一个空行；它的子层也跟着没有入口
+        }
+        MenuNode node;
+        node.id = item.id != nullptr ? item.id : "";
+        node.label = item.label;
+        node.onActivate = item.onActivate;
+        if (item.children != nullptr && item.childCount > 0)
+        {
+            const int childBase = Ingest(item.children, item.childCount);
+            if (childBase >= 0)
+            {
+                node.childBase = childBase;
+                node.childCount = static_cast<int>(nodes.size()) - childBase;
+            }
+        }
+        built.push_back(std::move(node));
+    }
+
+    if (built.empty())
+    {
+        return -1;
+    }
+
+    // 父层在子层**之后**落盘：这样"这段连续下标"对父子都是准的（子层的项
+    // 是递归 append 出来的，只需记录起点与长度）。
+    const int base = static_cast<int>(nodes.size());
+    for (MenuNode& node : built)
+    {
+        nodes.push_back(std::move(node));
+    }
+    return base;
+}
+
+MenuLayer* MenuStack::EnsureLayer(int level)
+{
+    while (static_cast<int>(layers.size()) <= level)
+    {
+        const int next = static_cast<int>(layers.size());
+        layers.push_back(std::make_unique<MenuLayer>(root, this, next));
+    }
+    return layers[static_cast<std::size_t>(level)].get();
+}
+
+void MenuStack::BuildLevel(int level, int base, int count, float anchorX, float anchorY)
+{
+    MenuLayer* layer = EnsureLayer(level);
+    if (layer == nullptr || count <= 0)
+    {
+        return;
+    }
+
+    layer->ClearRows();
+    // `Resize` 内部在布局有效时会重排一次，所以这里不用再单独喊 `Relayout`。
+    const int height = kMenuPadding * 2 + count * kMenuItemHeight + (count - 1) * kMenuGap;
+    layer->Resize(kMenuItemWidth + kMenuPadding * 2, height);
+
+    for (int index = 0; index < count; ++index)
+    {
+        const MenuNode& node = nodes[static_cast<std::size_t>(base + index)];
+        ButtonData look = makeMenuRowButton();
+        look.name = node.id.empty() ? ("GoldingGamestoryShell.menu.row." + std::to_string(index)) : node.id;
+        // 有子层就在文字后给一个箭头：菜单的惯例，且不占额外宽度预算。
+        look.label = node.childCount > 0 ? (node.label + "  ›") : node.label;
+
+        auto row = std::make_unique<InkingStaticButton>(nullptr, look);
+        row->SetOnClicked([this, level, nodeIndex = base + index, rowIndex = index] {
+            Activate(level, nodeIndex, rowIndex);
+        });
+        layer->AddRow(std::move(row));
+    }
+
+    layer->Relayout();
+    layer->OpenAt(anchorX, anchorY);
+}
+
+void MenuStack::Open(int base, int count, float anchorX, float anchorY)
+{
+    CloseAll();
+    open = true;
+    BuildLevel(0, base, count, anchorX, anchorY);
+}
+
+void MenuStack::CloseAll()
+{
+    for (auto& layer : layers)
+    {
+        if (layer != nullptr && layer->IsOpen())
+        {
+            layer->Close();
+        }
+    }
+    open = false;
+}
+
+void MenuStack::CloseAbove(int level)
+{
+    for (int index = level + 1; index < static_cast<int>(layers.size()); ++index)
+    {
+        MenuLayer* layer = layers[static_cast<std::size_t>(index)].get();
+        if (layer != nullptr && layer->IsOpen())
+        {
+            layer->Close();
+        }
+    }
+}
+
+void MenuStack::Activate(int level, int nodeIndex, int rowIndex)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(nodes.size()))
+    {
+        return;
+    }
+    const MenuNode node = nodes[static_cast<std::size_t>(nodeIndex)];
+
+    if (node.childCount > 0)
+    {
+        if (level + 1 >= kMenuMaxLayers)
+        {
+            g_host.Warn("[shell] 菜单层级超过上限，子层没有展开");
+            return;
+        }
+        MenuLayer* layer = (level >= 0 && level < static_cast<int>(layers.size()))
+                               ? layers[static_cast<std::size_t>(level)].get()
+                               : nullptr;
+        InkingStaticButton* row = layer != nullptr ? layer->RowAt(rowIndex) : nullptr;
+        if (row == nullptr)
+        {
+            return;
+        }
+
+        // 换分支时先收掉更深的层：否则展开新子层后旧的那串还挂在右边。
+        CloseAbove(level);
+
+        // 子层钉在**这一项**的右侧：与这一项的顶边对齐、左右留 2px 缝，
+        // 否则两个白卡片会连成一块。越界由浮窗的落位算法翻到左边。
+        const float anchorX = layer->GetX() + static_cast<float>(layer->GetWidth()) + 2.0f;
+        const float anchorY = layer->GetY() + row->GetY();
+        BuildLevel(level + 1, node.childBase, node.childCount, anchorX, anchorY);
+        return;
+    }
+
+    // 叶子：先关整串再执行动作——动作里可能再弹一个模态框，显隐顺序反了会打架。
+    CloseAll();
+    if (node.onActivate != nullptr)
+    {
+        node.onActivate(nullptr, node.id.c_str());
+    }
+}
+
+void MenuStack::HandlePointerChanged(MenuLayer* self)
+{
+    if (!open || self == nullptr)
+    {
+        return;
+    }
+    inking::InkingScene* scene = self->GetScene();
+    if (scene == nullptr)
+    {
+        return;
+    }
+    // 只在"按着"时判：菜单打开后鼠标划过别处不该把它关掉（那是 hover，不是点击）。
+    if (!scene->GetPointerDown().any())
+    {
+        return;
+    }
+    if (AnyLayerContains(scene->GetPointerX(), scene->GetPointerY()))
+    {
+        return;
+    }
+    CloseAll();
+}
+
+bool MenuStack::AnyLayerContains(float x, float y) const
+{
+    for (const auto& layer : layers)
+    {
+        if (layer != nullptr && layer->IsOpen() && layer->ContainsPoint(x, y))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// ---- 菜单服务 ----
+
+int menuOpen(void* /*self*/, const char* regionItemId, const golding::MenuDecl* menu)
+{
+    if (!g_parts || g_parts->root == nullptr || menu == nullptr || menu->items == nullptr ||
+        menu->itemCount <= 0)
+    {
+        return 1;
+    }
+
+    g_menu.CloseAll();
+    g_menu.nodes.clear();
+
+    const int base = g_menu.Ingest(menu->items, menu->itemCount);
+    if (base < 0)
+    {
+        g_host.Warn((std::string("菜单没有任何可见项：") + (menu->id != nullptr ? menu->id : "(无名)")).c_str());
+        return 1;
+    }
+    const int count = static_cast<int>(g_menu.nodes.size()) - base;
+
+    // 锚点：贴着那个顶栏按钮的左下角展开。找不到 id 就退到窗口左上角——
+    // 菜单仍然能开，不至于因为一个 id 拼错就整个功能消失（诊断有一行 WARN）。
+    float anchorX = 8.0f;
+    float anchorY = static_cast<float>(kBarHeight) + 4.0f;
+    const auto it = regionItemId != nullptr ? g_parts->barItems.find(regionItemId) : g_parts->barItems.end();
+    if (it != g_parts->barItems.end() && it->second != nullptr)
+    {
+        const float rootX = g_parts->root->GetAbsX();
+        const float rootY = g_parts->root->GetAbsY();
+        anchorX = it->second->GetAbsX() - rootX;
+        // 留 4px 缝：菜单紧贴按钮底部会像是顶栏的一部分。
+        anchorY = it->second->GetAbsY() - rootY + static_cast<float>(it->second->GetHeight()) + 4.0f;
+    }
+    else if (regionItemId != nullptr)
+    {
+        g_host.Warn((std::string("菜单锚点区域项不存在，从左上方展开：") + regionItemId).c_str());
+    }
+
+    g_menu.Open(base, count, anchorX, anchorY);
+    return 0;
+}
+
+void menuClose(void* /*self*/)
+{
+    g_menu.CloseAll();
+}
+
+int menuIsOpen(void* /*self*/)
+{
+    return g_menu.open ? 1 : 0;
+}
+
+const golding::MenuService kMenuService{GOLDING_PLUGIN_ABI_VERSION, &menuOpen, &menuClose, &menuIsOpen};
+
+
+/** 把一项挂进区域容器：填了 `create` 就交给插件自己画，否则按 `title` 造一个按钮。
+ *
+ * 返回挂上去的那个节点（菜单服务要按区域项 id 找锚点，所以顶栏这一支必须留指针）。
+ */
+inking::InkingWidget* placeRegionItem(const GoldingRegionItemDecl* item, inking::InkingWidget* container,
+                                      const ButtonData& look, bool useMenuBar)
 {
     if (item == nullptr || container == nullptr)
     {
-        return;
+        return nullptr;
     }
 
     if (item->create != nullptr)
     {
         // 契约：插件把新建子树的根挂到 parent 上。顶栏这一支会排在菜单栏的
         // 弹簧与窗口按钮之后（顺序由 MenuBar 内部维护），要精确位置就用按钮形态。
-        if (item->create(g_host.Context(), container) == nullptr)
+        auto* created = static_cast<inking::InkingWidget*>(item->create(g_host.Context(), container));
+        if (created == nullptr)
         {
             g_host.Warn((std::string("区域项内容创建失败：") + (item->id != nullptr ? item->id : "(无名)")).c_str());
         }
-        return;
+        return created;
     }
 
     if (item->title == nullptr || item->title[0] == '\0')
     {
-        return; // 既没有界面也没有名字：没什么可画的
+        return nullptr; // 既没有界面也没有名字：没什么可画的
     }
 
     if (useMenuBar)
@@ -231,13 +693,12 @@ void placeRegionItem(const GoldingRegionItemDecl* item, inking::InkingWidget* co
         // 自检 / 自动化也能按名字命中（`InkingScene::Activate("settings.entry")`）。
         ButtonData menuLook = look;
         menuLook.name = item->id != nullptr ? item->id : "menubar.item";
-        bar->AddButton(menuLook, item->title, [item, host = g_host] {
+        return bar->AddButton(menuLook, item->title, [item, host = g_host] {
             if (item->onActivate != nullptr)
             {
                 item->onActivate(host.Context());
             }
         });
-        return;
     }
 
     // 直接 new 一条按钮时，文字要自己填进 `ButtonData::label`——`AddButton` 那条路
@@ -249,7 +710,7 @@ void placeRegionItem(const GoldingRegionItemDecl* item, inking::InkingWidget* co
         container->AddChild(std::make_unique<InkingStaticButton>(container, data)));
     if (button == nullptr)
     {
-        return;
+        return nullptr;
     }
     button->SetName(item->id != nullptr ? item->id : item->title);
     button->SetOnClicked([item, host = g_host] {
@@ -258,6 +719,7 @@ void placeRegionItem(const GoldingRegionItemDecl* item, inking::InkingWidget* co
             item->onActivate(host.Context());
         }
     });
+    return button;
 }
 
 /** 把侧栏的展开/收起落到几何上：改宽度 → 主体重排（内容区的 `fillMain` 自动跟着变）。 */
@@ -342,6 +804,10 @@ int popupPush(void* /*self*/, const golding::GoldingPopupDecl* decl)
         return 1;
     }
     ShellParts& parts = *g_parts;
+
+    // 弹模态框之前先收菜单：菜单层（260）会被遮罩（300）盖住，但状态还开着，
+    // 关掉弹窗之后它又露出来——那是"点了个菜单项，回来菜单还挂着"的怪相。
+    g_menu.CloseAll();
 
     // 静态面板"几何构造即定型"，改不了尺寸——所以每次 push 重建一块，
     // 而不是留一块常驻再 Resize。push 是低频动作（弹对话框），重建的代价可以忽略。
@@ -552,7 +1018,15 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
     const int menuItems = g_host.RegionItemCount("menubar");
     for (int index = 0; index < menuItems; ++index)
     {
-        placeRegionItem(g_host.RegionItemAt("menubar", index), parts->bar, makeBarButton("menubar.item", 96), true);
+        const GoldingRegionItemDecl* item = g_host.RegionItemAt("menubar", index);
+        inking::InkingWidget* placed =
+            placeRegionItem(item, parts->bar, makeBarButton("menubar.item", 96), true);
+        // 菜单服务按区域项 id 找锚点（`GoldingMenuItem` 的 `regionItemId` 那一条），
+        // 所以顶栏项必须留一份指针。侧栏项眼下没有菜单入口，不留。
+        if (placed != nullptr && item != nullptr && item->id != nullptr && item->id[0] != '\0')
+        {
+            parts->barItems[item->id] = placed;
+        }
     }
 
     const int sideItems = g_host.RegionItemCount("sidebar");
@@ -607,6 +1081,9 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
             break;
         }
     }
+
+    // 菜单栈要往根上挂层：给它根节点（层是懒创建的，这里只是记下父级）。
+    g_menu.root = parts->root;
 
     g_parts = parts;
     std::printf("[shell] 骨架已建：%dx%d，顶栏 %d，侧栏 %d，menubar 项 %d，sidebar 项 %d，页面 %d\n", width, height,
@@ -709,6 +1186,7 @@ public:
         ok = host.AddRegion(kSidebarRegion) && ok;
         ok = host.AddService(golding::kNavigationServiceName, &kNavigationService) && ok;
         ok = host.AddService(golding::kPopupServiceName, &kPopupService) && ok;
+        ok = host.AddService(golding::kMenuServiceName, &kMenuService) && ok;
         return ok;
     }
 

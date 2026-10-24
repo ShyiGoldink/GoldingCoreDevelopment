@@ -5,6 +5,7 @@
   "apiVersion": 2,
   "requires": { "plugins": ["GoldingGamestoryShell"] },
   "needs": { "golding.popup": 1 },
+  "provides": { "golding.settings": 1 },
   "targets": {
     "win64": { "lib": "bin/settings.dll" }
   }

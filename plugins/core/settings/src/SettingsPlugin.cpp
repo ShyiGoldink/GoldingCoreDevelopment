@@ -1,4 +1,6 @@
+#include "GoldingMenu.h"
 #include "GoldingServices.h"
+#include "GoldingSettings.h"
 
 #include <sdk/GoldingPlugin.h>
 
@@ -12,6 +14,7 @@
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // settings —— 设置入口（普通插件，不是面板）。
@@ -35,9 +38,20 @@ namespace theme = inking::prefab::theme;
 golding::Host g_host{nullptr, nullptr};
 /** 弹窗服务；`Ready`/点击时用得上，`Register` 里存下来。 */
 const golding::PopupService* g_popup = nullptr;
+/** 菜单服务（面板插件提供）；拿不到时退回"直接弹模态框"。 */
+const golding::MenuService* g_menu = nullptr;
 
 constexpr int kPopupWidth = 720;
 constexpr int kPopupHeight = 560;
+
+/**
+ * 这次弹窗只显示哪一个区块（空 = 全部）。
+ *
+ * 为什么要一个文件级静态量：弹窗的 `create` 是 C 函数指针，**没有参数位**
+ * 传"用户点了哪一项"。点击发生在菜单项回调里，那里把 id 写进来，`create`
+ * 再读它——两次调用在同一条点击栈上，不会串。
+ */
+std::string g_onlySectionId;
 
 /** 弹窗内容：标题 + 已注册的设置区块 + 关闭按钮。 */
 GoldingWidgetHandle createSettingsPanel(void* /*hostContext*/, void* parent)
@@ -65,10 +79,26 @@ GoldingWidgetHandle createSettingsPanel(void* /*hostContext*/, void* parent)
     auto* panel = static_cast<inking::InkingStaticPanel*>(
         popup->AddChild(std::make_unique<inking::InkingStaticPanel>(popup, root)));
 
+    // 只显示一个区块时标题用它自己的名字：从菜单点进来的用户已经选过一次了，
+    // 还写"设置"会让人以为进错了地方。
+    const GoldingSettingsDecl* single = nullptr;
+    if (!g_onlySectionId.empty())
+    {
+        for (int index = 0; index < g_host.SettingsSectionCount(); ++index)
+        {
+            const GoldingSettingsDecl* section = g_host.SettingsSectionAt(index);
+            if (section != nullptr && section->id != nullptr && g_onlySectionId == section->id)
+            {
+                single = section;
+                break;
+            }
+        }
+    }
+
     inking::LabelData title;
     title.name = "settings.title";
     title.height = 36;
-    title.text = "设置";
+    title.text = single != nullptr ? (single->title != nullptr ? single->title : single->id) : "设置";
     title.color = theme::kTextPrimary;
     title.colorToken = "textPrimary";
     title.style.fontSize = 22.0f;
@@ -79,20 +109,34 @@ GoldingWidgetHandle createSettingsPanel(void* /*hostContext*/, void* parent)
     // 本插件不认识任何具体设置项的名字，也不该认识。
     const int count = g_host.SettingsSectionCount();
     int mounted = 0;
-    for (int index = 0; index < count; ++index)
+    if (single != nullptr)
     {
-        const GoldingSettingsDecl* section = g_host.SettingsSectionAt(index);
-        if (section == nullptr || section->id == nullptr)
-        {
-            continue;
-        }
-        if (g_host.MountSettingsSection(section->id, panel) != nullptr)
+        if (g_host.MountSettingsSection(single->id, panel) != nullptr)
         {
             ++mounted;
         }
         else
         {
-            g_host.Warn((std::string("设置区块挂载失败：") + section->id).c_str());
+            g_host.Warn((std::string("设置区块挂载失败：") + single->id).c_str());
+        }
+    }
+    else
+    {
+        for (int index = 0; index < count; ++index)
+        {
+            const GoldingSettingsDecl* section = g_host.SettingsSectionAt(index);
+            if (section == nullptr || section->id == nullptr)
+            {
+                continue;
+            }
+            if (g_host.MountSettingsSection(section->id, panel) != nullptr)
+            {
+                ++mounted;
+            }
+            else
+            {
+                g_host.Warn((std::string("设置区块挂载失败：") + section->id).c_str());
+            }
         }
     }
 
@@ -149,21 +193,134 @@ GoldingWidgetHandle createSettingsPanel(void* /*hostContext*/, void* parent)
     return panel;
 }
 
-const golding::GoldingPopupDecl kSettingsPopup = {
-    "settings.popup", kPopupWidth, kPopupHeight, 0, 0, 1, &createSettingsPanel, nullptr};
+const golding::GoldingPopupDecl kSettingsPopupAll = {
+    "settings.popup.all", kPopupWidth, kPopupHeight, 0, 0, 1, &createSettingsPanel, nullptr};
+/** 单区块用的小一号：内容只有一块，开 720×560 会空一大片。 */
+const golding::GoldingPopupDecl kSettingsPopupOne = {
+    "settings.popup.one", 560, 420, 0, 0, 1, &createSettingsPanel, nullptr};
 
-void onMenuActivate(void* /*hostContext*/)
+void pushSettingsPopup(const golding::GoldingPopupDecl* decl)
 {
     if (g_popup == nullptr)
     {
         g_host.Warn("拿不到 golding.popup：设置弹窗打不开");
         return;
     }
-    if (g_popup->push(nullptr, &kSettingsPopup) != 0)
+    if (g_popup->push(nullptr, decl) != 0)
     {
         g_host.Warn("设置弹窗弹出失败");
     }
 }
+
+/** 菜单项被点：只弹那一个区块。 */
+void onSettingsItem(void* /*hostContext*/, const char* itemId)
+{
+    if (itemId == nullptr || itemId[0] == '\0')
+    {
+        return;
+    }
+    g_onlySectionId = itemId;
+    pushSettingsPopup(&kSettingsPopupOne);
+    g_onlySectionId.clear();
+}
+
+/**
+ * 在 `anchorRegionItemId` 这个顶栏按钮下面打开设置菜单（列区块）。
+ *
+ * 为什么锚点是"区域项 id"：面板才知道那个按钮在哪（`GoldingMenu.h` 同一条），
+ * 所以别人用自己注册的按钮打开设置内容时，也只需要交自己的区域项 id。
+ */
+int openSettingsMenu(const char* anchorRegionItemId)
+{
+    if (g_menu == nullptr)
+    {
+        // 面板不支持菜单：退回"直接弹完整设置框"。降级而不是报错，功能还在。
+        g_onlySectionId.clear();
+        pushSettingsPopup(&kSettingsPopupAll);
+        return 0;
+    }
+
+    // 菜单声明只需要在 `open` 调用期间有效（面板会深拷贝整棵树），所以这里
+    // 直接拼一份栈上的 `vector`：区块列表本来就是"装配后才确定"的动态内容。
+    std::vector<golding::MenuItem> items;
+    const int count = g_host.SettingsSectionCount();
+    items.reserve(static_cast<std::size_t>(count > 0 ? count : 1));
+    for (int index = 0; index < count; ++index)
+    {
+        const GoldingSettingsDecl* section = g_host.SettingsSectionAt(index);
+        if (section == nullptr || section->id == nullptr)
+        {
+            continue;
+        }
+        golding::MenuItem item{};
+        item.id = section->id;
+        item.label = section->title != nullptr ? section->title : section->id;
+        item.onActivate = &onSettingsItem;
+        items.push_back(item);
+    }
+    if (items.empty())
+    {
+        // 空态也是一项：菜单里至少要有一行，否则 `open` 会判"没有可见项"。
+        golding::MenuItem empty{};
+        empty.label = "（暂时没有可配置项）";
+        items.push_back(empty);
+    }
+
+    golding::MenuDecl decl{"settings.menu", items.data(), static_cast<int>(items.size())};
+    if (g_menu->open(nullptr, anchorRegionItemId, &decl) != 0)
+    {
+        g_host.Warn("设置菜单打开失败，退回弹窗");
+        g_onlySectionId.clear();
+        pushSettingsPopup(&kSettingsPopupAll);
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * 顶栏「设置」被点：先把设置区块列成一份**多层级浮窗菜单**（`golding.menu`），
+ * 点某一项才弹那块内容。
+ *
+ * 为什么不是"点一下直接弹模态框"：模态框会盖住整个窗口，而设置经常是
+ * "看一眼就走"的动作——菜单浮窗不阻断，点外面就收。
+ */
+void onMenuActivate(void* /*hostContext*/)
+{
+    openSettingsMenu("settings.entry");
+}
+
+// ---- `golding.settings` 服务 ----
+
+int settingsOpenAll(void* /*self*/)
+{
+    g_onlySectionId.clear();
+    pushSettingsPopup(&kSettingsPopupAll);
+    return 0;
+}
+
+int settingsOpenSection(void* /*self*/, const char* sectionId)
+{
+    if (sectionId == nullptr || sectionId[0] == '\0')
+    {
+        return 1;
+    }
+    g_onlySectionId = sectionId;
+    pushSettingsPopup(&kSettingsPopupOne);
+    g_onlySectionId.clear();
+    return 0;
+}
+
+int settingsOpenMenuAt(void* /*self*/, const char* regionItemId)
+{
+    return openSettingsMenu(regionItemId);
+}
+
+const golding::SettingsService kSettingsService{
+    GOLDING_PLUGIN_ABI_VERSION,
+    &settingsOpenAll,
+    &settingsOpenSection,
+    &settingsOpenMenuAt,
+};
 
 const GoldingRegionItemDecl kMenuEntry = {
     "menubar",       // 区域：面板插件自己定的约定
@@ -190,7 +347,22 @@ public:
             // 区域项本身也会被驳回（区域不存在），同样不影响别的插件。
             host.Warn("没有 golding.popup：设置入口将不可用");
         }
-        return host.AddRegionItem(kMenuEntry);
+
+        // 菜单是主入口、弹窗是降级路径：拿不到就退回"点一下直接弹框"。
+        // 不写进 `plugin.json` 的 `needs`，因为它不是硬前提。
+        g_menu = host.Use<golding::MenuService>(golding::kMenuServiceName, 1);
+        if (g_menu == nullptr)
+        {
+            host.Warn("没有 golding.menu：设置改为直接弹窗");
+        }
+
+        // 服务：让别的插件也能"打开设置"（它们不该重写一遍列区块 + 弹窗）。
+        bool ok = host.AddService(golding::kSettingsServiceName, &kSettingsService);
+        if (!ok)
+        {
+            host.Warn("golding.settings 服务注册失败（同名已被占用？）");
+        }
+        return host.AddRegionItem(kMenuEntry) && ok;
     }
 };
 
