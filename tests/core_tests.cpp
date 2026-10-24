@@ -12,9 +12,11 @@
 #include <fstream>
 #include <string>
 
+#include "Application/CapabilityRegistry.h"
 #include "Application/ManifestLoader.h"
 #include "Application/PageRegistry.h"
-#include "Application/PluginRegistry.h"
+#include "Application/PanelRootRegistry.h"
+#include "Application/PluginLibrary.h"
 #include "Application/RegionRegistry.h"
 #include "Application/ServiceRegistry.h"
 #include "Application/SettingsRegistry.h"
@@ -114,6 +116,8 @@ void checkManifest(const fs::path& root)
   "version": "0.1.0",
   "apiVersion": 3,
   "requires": { "plugins": [] },
+  "provides": { "probe.service": 2 },
+  "needs": { "probe.base": 1 },
   "targets": { "win64": { "lib": "bin/probe.dll" } }
 })";
     check(writeFile(good / "plugin.json", body), "写入 good/plugin.json");
@@ -122,6 +126,12 @@ void checkManifest(const fs::path& root)
     check(result.status == ManifestStatus::Pass, "manifest 正常文件 → Pass", result.detail);
     check(samePath(golding::PathFinder::fromUtf8(result.manifest.dllPath), good / "bin/probe.dll"),
           "manifest dllPath 是绝对路径", result.manifest.dllPath);
+    check(result.manifest.provides.size() == 1 && result.manifest.provides[0].name == "probe.service" &&
+              result.manifest.provides[0].version == 2,
+          "provides 解析出名字 + 提供版本");
+    check(result.manifest.needs.size() == 1 && result.manifest.needs[0].name == "probe.base" &&
+              result.manifest.needs[0].version == 1,
+          "needs 解析出名字 + 最小版本");
 
     // ---- dll 路径逃逸 → 整份 manifest 判 Invalid（不能当成"没配"）----
     const fs::path escape = root / "escape";
@@ -153,6 +163,32 @@ void checkManifest(const fs::path& root)
                          "targets": { "win64": { "lib": "D:/elsewhere/probe.dll" } } })"),
           "写入 absolute/plugin.json");
     check(ManifestLoader::read(absolute).status == ManifestStatus::Invalid, "dll 写绝对路径 → Invalid");
+
+    // ---- 缺 dll → Invalid ----
+    // "无 dll 的纯数据插件"这个形态在 2026-10-24 取消（Options.md §9）：它进不了
+    // 依赖图、不能声明能力，唯一效果是在档案表里多一行。所以缺 targets 是配置错误。
+    const fs::path noDll = root / "no-dll";
+    check(writeFile(noDll / "plugin.json",
+                    R"({ "name": "nodll", "title": "t", "version": "0.1.0", "apiVersion": 3,
+                         "requires": { "plugins": [] } })"),
+          "写入 no-dll/plugin.json");
+    const auto noDllResult = ManifestLoader::read(noDll);
+    check(noDllResult.status == ManifestStatus::Invalid, "缺 targets.win64.lib → Invalid", noDllResult.detail);
+    check(noDllResult.detail.find("targets") != std::string::npos, "驳回原因点名 targets", noDllResult.detail);
+
+    // ---- 能力表写成数组 → Invalid（形态是对象：能力名 → 版本）----
+    const fs::path badCapability = root / "bad-capability";
+    check(writeFile(badCapability / "plugin.json",
+                    R"({ "name": "bc", "title": "t", "version": "0.1.0", "apiVersion": 3,
+                         "requires": { "plugins": [] },
+                         "provides": ["golding.overlay"],
+                         "targets": { "win64": { "lib": "bin/x.dll" } } })"),
+          "写入 bad-capability/plugin.json");
+    const auto badCapabilityResult = ManifestLoader::read(badCapability);
+    check(badCapabilityResult.status == ManifestStatus::Invalid, "provides 写成数组 → Invalid",
+          badCapabilityResult.detail);
+    check(badCapabilityResult.detail.find("provides") != std::string::npos, "驳回原因点名 provides",
+          badCapabilityResult.detail);
 
     // ---- 缺必需字段 → Invalid；文件不存在 → Error（两档不能混）----
     const fs::path missingField = root / "missing-field";
@@ -230,13 +266,52 @@ void checkRegistryStats()
           "同名服务 → 驳回");
     check(ServiceRegistry::stats().accepted == 1 && ServiceRegistry::stats().rejected == 1, "服务表：1 接受 / 1 驳回");
 
-    // ---- 组件表 ----
-    PluginRegistry::clear();
-    const GoldingWidgetClass widgetClass{"probe.widget", noopWidgetCreate, nullptr};
-    PluginRegistry::registerClass(&widgetClass, "probe");
-    PluginRegistry::registerClass(&widgetClass, "probe");
-    check(PluginRegistry::stats().accepted == 1 && PluginRegistry::stats().rejected == 1, "组件表：1 接受 / 1 驳回",
-          PluginRegistry::stats().lastReject);
+    // ---- 能力声明面：版本可读；重复声明第一个说了算 ----
+    CapabilityRegistry::reset();
+    CapabilityRegistry::declare("probe.cap", 2, "probe");
+    check(CapabilityRegistry::isDeclared("probe.cap") && CapabilityRegistry::versionOf("probe.cap") == 2,
+          "能力声明：名字与版本都可读");
+    CapabilityRegistry::declare("probe.cap", 9, "other");
+    check(CapabilityRegistry::versionOf("probe.cap") == 2, "能力声明：重复声明不覆盖版本");
+    check(std::string(CapabilityRegistry::declarerOf("probe.cap")) == "probe", "能力声明：提供方点名第一个");
+    check(CapabilityRegistry::versionOf("probe.absent") == 0, "能力声明：未声明返回 0");
+
+    // ---- 档案表：能力声明带版本（来源是 plugin.json，不是 descriptor）----
+    PluginLibrary::reset();
+    const std::vector<golding::ManifestCapability> offers{{"probe.cap", 3}};
+    const std::vector<golding::ManifestCapability> requests{{"probe.base", 1}};
+    golding::ManifestFacts facts;
+    facts.provides = &offers;
+    facts.needs = &requests;
+    PluginLibrary::add("probe", "探针", "0.1.0", "", 0, golding::PluginState::Ready, {}, facts);
+    check(PluginLibrary::providesOf(0).size() == 1 && PluginLibrary::providesOf(0)[0].version == 3,
+          "档案表：provides 带提供版本");
+    check(PluginLibrary::needsOf(0).size() == 1 && PluginLibrary::needsOf(0)[0].version == 1,
+          "档案表：needs 带最小版本");
+    PluginLibrary::reset();
+
+    // ---- 面板根槽位：只有一个，第二次一律驳回 ----
+    PanelRootRegistry::clear();
+    const GoldingWidgetClass rootClass{"probe.root", noopWidgetCreate, nullptr};
+    const GoldingWidgetClass otherClass{"probe.other", noopWidgetCreate, nullptr};
+    check(PanelRootRegistry::setRoot(&rootClass, "probe") == PanelRootRegistry::Result::Ok &&
+              PanelRootRegistry::root() == &rootClass && PanelRootRegistry::provider() == "probe",
+          "面板根槽位：首次设置成功，取回同一指针");
+
+    check(PanelRootRegistry::setRoot(&otherClass, "other") == PanelRootRegistry::Result::AlreadySet,
+          "面板根槽位：第二次（不同名）也驳回");
+    check(PanelRootRegistry::stats().accepted == 1 && PanelRootRegistry::stats().rejected == 1 &&
+              PanelRootRegistry::stats().lastReject.find("probe") != std::string::npos,
+          "面板根槽位：计数正确，驳回原因点名现任提供方", PanelRootRegistry::stats().lastReject);
+
+    const GoldingWidgetClass noCreateClass{"probe.nocreate", nullptr, nullptr};
+    check(PanelRootRegistry::setRoot(nullptr, "probe") == PanelRootRegistry::Result::Invalid &&
+              PanelRootRegistry::setRoot(&noCreateClass, "probe") == PanelRootRegistry::Result::Invalid,
+          "面板根槽位：空指针 / 缺 create → Invalid");
+
+    PanelRootRegistry::clear();
+    check(PanelRootRegistry::root() == nullptr && PanelRootRegistry::stats().accepted == 0,
+          "面板根槽位：clear 同时清值与计数");
 
     // ---- 排序规则：页表同 order 按 id；区域条目同 order 先到先得 ----
     // 三张表合成一个 SlotTable 之后，这条差别是**唯一**按表不同的行为，必须钉住。

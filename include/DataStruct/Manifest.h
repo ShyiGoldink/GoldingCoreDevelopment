@@ -14,6 +14,18 @@ enum class ManifestStatus
     Error,   // 文件读不到（不存在、无权限、读取中断）
 };
 
+/**
+ * @brief `plugin.json` 里的一条能力声明：名字 + 版本。
+ *
+ * - 在 `provides` 里，`version` 是"我提供的这个能力是第几版"；
+ * - 在 `needs` 里，`version` 是"我至少要第几版"，0 = 不关心版本。
+ */
+struct ManifestCapability
+{
+    std::string name;
+    unsigned int version = 0;
+};
+
 /**plugin.json 的结构：README 第 47 行的必需字段与可选字段。*/
 struct Manifest
 {
@@ -42,6 +54,22 @@ struct Manifest
     /**requires.plugins：依赖的插件名。（成员不能叫 requires——C++20 起是关键字）*/
     std::vector<std::string> dependencies;
 
+    /**
+     * 我提供的能力：`{ "golding.overlay": 1 }`。
+     *
+     * **放在 `plugin.json` 而不是 descriptor**，因为它要参与"扫描之后立刻整理拓扑"：
+     * `plugin.json` 在扫描阶段就全量可读，而 descriptor 要等 dll 加载完。
+     * 声明面带版本，`needs` 的最小版本才有可比的对象——否则静态校验只能比名字。
+     */
+    std::vector<ManifestCapability> provides;
+
+    /**
+     * 我需要的能力与最小版本：`{ "golding.apps": 2 }`。
+     *
+     * 缺能力或版本不足时**不影响加载**，只影响能否装配（`validateNeeds` 用）。
+     */
+    std::vector<ManifestCapability> needs;
+
     /*
      * 这里曾有 `widgets{组件名: 配置路径}`（T-11 删除）。
      *
@@ -55,10 +83,15 @@ struct Manifest
      * 曾写在 json 里那种死法。
      */
 
-    /**是否声明了 targets.win64.lib。*/
-    bool hasDll = false;
     /**
      * `targets.win64.lib` 解析后的**绝对路径**（UTF-8）。
+     *
+     * **必需**：`plugin.json` 必须声明 `targets.win64.lib`，缺了整份判 `Invalid`。
+     *
+     * 这里曾有一个 `hasDll` 标志，用来支持"无 dll 的纯数据插件"。那个形态在
+     * T-11 删掉 `widgets{}` 之后就没有载体了：无 dll 的插件进不了依赖图、
+     * 不能声明能力、也不会被调 `entry`，唯一效果是在档案表里多一行。
+     * 2026-10-24 取消该形态（`docs/Options.md`），缺 dll 是配置错误。
      *
      * `plugin.json` 里写的是相对插件目录的路径，`ManifestLoader` 读完当场解析，
      * 所以拿到这里的消费者（`HostApp::loadEntry`）不必知道基准目录是谁。

@@ -18,7 +18,13 @@ enum class PluginState
     ManifestInvalid = 1, // plugin.json 读不出来，或内容不合规
     LibraryError = 2,    // dll 打不开（不存在 / 位数不对 / 缺依赖库）
     AbiMismatch = 3,     // descriptor 的 abiVersion 与宿主不一致
-    NoDll = 4,           // 没有 targets.win64.lib，纯数据插件，当前不装配
+
+    // 4 已废弃（2026-10-24）：曾表示"没有 dll 的纯数据插件"。
+    // 那个形态没有载体（`widgets{}` 在 T-11 已删），也进不了依赖图，已整体取消——
+    // 缺 `targets.win64.lib` 现在直接判 `ManifestInvalid`（`docs/Options.md`）。
+    // **编号保留为空缺，不重排**：这些整数值是跨 dll 契约（`GoldingPluginInfo.state`），
+    // 重排会让所有历史日志与插件侧的判断错位。
+
     EntryFailed = 5,     // entry 返回了非 0
     Unresolved = 6,      // 依赖缺失，或依赖成环——无法排进装配顺序
     ApiTooNew = 7,       // manifest 声明的 apiVersion 高于宿主支持，能力给不了

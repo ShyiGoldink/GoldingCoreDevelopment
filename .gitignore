@@ -1,4 +1,6 @@
 build/
+# 分支/开关各一份的临时构建目录（build-off、build-inking …）
+build-*/
 
 # AI 工作记录（记忆 / 日志），不属于产品代码，只留在本地磁盘
 .workbuddy/

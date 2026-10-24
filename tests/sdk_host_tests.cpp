@@ -4,7 +4,8 @@
 // "双头方案"第一层的证据：`GoldingPlugin.h` 零 UI 依赖）。
 //
 // 它验的不是"功能对不对"，而是**接口契约**：
-//   - descriptor 怎么从 Manifest() 填出来、`abiVersion` 是不是编译期常量；
+//   - descriptor 只剩二进制身份（abiVersion / sdkId / sdkVersion / ready），
+//     且**读它不构造插件对象**——描述在 `plugin.json`，dll 不需要实例；
 //   - entry 怎么转发进插件自己的 Register、注册是不是恰好一次；
 //   - Ready 的返回值是不是**原样**传给宿主（宿主拿它汇总退出码）；
 //   - SDK 版本常量有没有真的接上 CMake（没接上就是兜底值）。
@@ -23,6 +24,9 @@ namespace
 
 int g_failures = 0;
 
+/**`TestPlugin` 被构造过几次。ABI v11 的硬契约：**读 descriptor 不许构造插件对象**。*/
+int g_constructed = 0;
+
 void check(const char* label, bool ok, const std::string& detail = "")
 {
     std::printf("[%s] %-34s %s\n", ok ? "ok" : "FAIL", label, detail.c_str());
@@ -34,8 +38,7 @@ void check(const char* label, bool ok, const std::string& detail = "")
 
 /**桩宿主：只记账，不实现任何行为。`hostContext` 就指向它自己。*/
 struct StubHost
-{
-    int logCalls = 0;
+{    int logCalls = 0;
     int registerPageCalls = 0;
     int registerServiceCalls = 0;
     int registerWidgetClassCalls = 0;
@@ -151,25 +154,7 @@ void fillApi(GoldingHostApi& api, StubHost& stub, unsigned int abi)
 class TestPlugin final : public golding::Plugin
 {
 public:
-    const golding::PluginManifest& Manifest() const override
-    {
-        static const char* const kDepends[] = {"shell"};
-        static const char* const kProvides[] = {"test.cap"};
-        static const golding::CapabilityNeed kNeeds[] = {{"golding.overlay", 1u}};
-        static const golding::PluginManifest kManifest = {
-            .name = "test",
-            .version = "9.8.7",
-            .rootWidgetClass = "TestRoot",
-            .kind = "logic",
-            .depends = kDepends,
-            .dependCount = 1,
-            .provides = kProvides,
-            .provideCount = 1,
-            .needs = kNeeds,
-            .needCount = 1,
-        };
-        return kManifest;
-    }
+    TestPlugin() { ++g_constructed; }
 
     bool Register(golding::Host& host) override
     {
@@ -206,43 +191,16 @@ struct FakeService
 
 int main()
 {
-    // ---- 1. descriptor：从 Manifest() 填出来，结构没动 ----
+    // ---- 1. descriptor：ABI v11 只剩二进制身份 + ready ----
     const GoldingPluginDescriptor* descriptor = golding::detail::BuildDescriptor<TestPlugin>();
     check("descriptor 非空", descriptor != nullptr);
+    check("读 descriptor 不构造插件对象", g_constructed == 0, "constructed=" + std::to_string(g_constructed));
     if (descriptor != nullptr)
     {
         check("abiVersion = 编译期常量", descriptor->abiVersion == GOLDING_PLUGIN_ABI_VERSION,
               std::to_string(descriptor->abiVersion).c_str());
-        check("name 来自 Manifest", descriptor->name != nullptr && std::strcmp(descriptor->name, "test") == 0,
-              descriptor->name != nullptr ? descriptor->name : "null");
-        check("version 来自 Manifest",
-              descriptor->version != nullptr && std::strcmp(descriptor->version, "9.8.7") == 0,
-              descriptor->version != nullptr ? descriptor->version : "null");
-        check("rootWidgetClass 来自 Manifest",
-              descriptor->rootWidgetClass != nullptr && std::strcmp(descriptor->rootWidgetClass, "TestRoot") == 0,
-              descriptor->rootWidgetClass != nullptr ? descriptor->rootWidgetClass : "null");
-        check("depends 原样带出", descriptor->dependCount == 1 && descriptor->depends != nullptr &&
-                                      std::strcmp(descriptor->depends[0], "shell") == 0,
-              "dependCount=" + std::to_string(descriptor->dependCount));
         check("ready 已挂钩", descriptor->ready != nullptr);
         check("descriptor 幂等", golding::detail::BuildDescriptor<TestPlugin>() == descriptor);
-
-        // ---- ABI v9：能力宣言与 SDK 身份 ----
-        check("manifest() 已挂钩", descriptor->manifest != nullptr);
-        const GoldingPluginManifest* declared = descriptor->manifest != nullptr ? descriptor->manifest() : nullptr;
-        check("manifest 与 Manifest() 同一份", declared == &TestPlugin().Manifest());
-        if (declared != nullptr)
-        {
-            check("manifest.kind", declared->kind != nullptr && std::strcmp(declared->kind, "logic") == 0,
-                  declared->kind != nullptr ? declared->kind : "null");
-            check("manifest.provides 原样带出", declared->provideCount == 1 && declared->provides != nullptr &&
-                                                     std::strcmp(declared->provides[0], "test.cap") == 0,
-                  "provideCount=" + std::to_string(declared->provideCount));
-            check("manifest.needs 原样带出", declared->needCount == 1 && declared->needs != nullptr &&
-                                                   declared->needs[0].minVersion == 1u &&
-                                                   std::strcmp(declared->needs[0].name, "golding.overlay") == 0,
-                  "needCount=" + std::to_string(declared->needCount));
-        }
 
         // sdkId 由编译期常量填，作者不写；sdkVersion 必须真的接上 CMake。
         check("descriptor.sdkId", descriptor->sdkId != nullptr && std::strcmp(descriptor->sdkId, "golding") == 0,
@@ -261,15 +219,16 @@ int main()
     GoldingHostApi api{};
     fillApi(api, stub, GOLDING_PLUGIN_ABI_VERSION);
 
-    const int entryCode = golding::detail::EntryThunk<TestPlugin>(&api);
+    const int entryCode = golding::detail::EntryThunk<TestPlugin>(&api, "test");
     check("entry 返回 0", entryCode == 0, std::to_string(entryCode).c_str());
+    check("entry 时才构造插件对象", g_constructed == 1, "constructed=" + std::to_string(g_constructed));
     check("注册页面恰好 1 次", stub.registerPageCalls == 1, std::to_string(stub.registerPageCalls).c_str());
     check("注册服务恰好 1 次", stub.registerServiceCalls == 1, std::to_string(stub.registerServiceCalls).c_str());
     check("每次注册都留痕", stub.logCalls >= 2, "logCalls=" + std::to_string(stub.logCalls));
-    check("留痕里点了名", std::strstr(stub.lastLog, "test") != nullptr, stub.lastLog);
+    check("留痕里用了宿主给的名字", std::strstr(stub.lastLog, "test") != nullptr, stub.lastLog);
 
     // ---- 4. ready：返回值原样传出 ----
-    const int readyCode = golding::detail::ReadyThunk<TestPlugin>(&api);
+    const int readyCode = golding::detail::ReadyThunk<TestPlugin>(&api, "test");
     check("ready 返回值原样传出", readyCode == 7, std::to_string(readyCode).c_str());
 
     // ---- 5. Use<T>：缺能力返回 nullptr 且留痕；有则返回 ----

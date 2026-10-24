@@ -3,13 +3,15 @@
 #include <cstring>
 #include <exception>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "Application/CapabilityRegistry.h"
 #include "Application/ManifestLoader.h"
 #include "Application/PageRegistry.h"
+#include "Application/PanelRootRegistry.h"
 #include "Application/PluginLibrary.h"
 #include "Application/PluginLoader.h"
-#include "Application/PluginRegistry.h"
 #include "Application/RegionRegistry.h"
 #include "Application/Resolver.h"
 #include "Application/ServiceRegistry.h"
@@ -53,11 +55,43 @@ const char* hostBootMode(void* /*context*/)
 }
 
 /**
+ * @brief provider 名字 → 它的 `hostContext`。
+ *
+ * `mountPage` / `mountSettingsSection` 是**面板插件**在调，但 `create` 的
+ * `hostContext` 应当属于**页面 / 区块的提供方**：页面插件在 `create` 里若用
+ * `hostContext` 调 HostApi（比如查自己的目录），拿别人的身份就是错的。
+ *
+ * 落文件静态量的理由同 `uiRootSlot`：插件回调只拿得到 `hostContext`，拿不到
+ * `HostApp`。一次进程一个 `HostApp` 是已定约定，所以一份就够。
+ */
+std::vector<std::pair<std::string, void*>>& providerContexts()
+{
+    static std::vector<std::pair<std::string, void*>> rows;
+    return rows;
+}
+
+void* contextOfProvider(const std::string& provider)
+{
+    if (provider.empty())
+    {
+        return nullptr;
+    }
+    for (const auto& row : providerContexts())
+    {
+        if (row.first == provider)
+        {
+            return row.second;
+        }
+    }
+    return nullptr;
+}
+
+/**
  * ABI v10：查某个插件的目录。
  *
  * **按名字查，不按 hostContext 查**——`hostContext` 现在是 `&entry.provider`
  * （一个字符串指针），拿它反查目录会需要一张"指针 → 目录"的旁表；名字本来就是
- * 档案表的唯一键，直接查它更短也更稳（`Options.md` §5 那条 `hostContext` 欠账
+ * 档案表的唯一键，直接查它更短也更稳（`docs/Options.md` 那条 `hostContext` 欠账
  * 因此不必现在动）。
  *
  * 未知名字返回 nullptr，不返回空串：调用方要能区分"没有这个插件"与"有但没登记目录"。
@@ -82,20 +116,42 @@ void hostLog(void* /*context*/, int level, const char* message)
     std::printf("[plugin/%s] %s\n", tag, message != nullptr ? message : "");
 }
 
+/**
+ * 注册界面根工厂。
+ *
+ * **只有面板插件能注册**。槽位只有一个：普通插件抢先注册会让真正的面板注册
+ * 不进来，表现是"界面空、日志全绿"——所以闸门放在注册口，而不是等装配时才发现。
+ * 表本身不认识 role，这是编排层的判断。
+ *
+ * `AlreadySet` 映射到 `GOLDING_REGISTER_NAME_TAKEN`：C 侧返回码不加新值
+ * （那会动 SDK 头），代价是插件侧日志说"名字已被占用"。原因在宿主日志里点名。
+ */
 int hostRegisterWidgetClass(void* context, const GoldingWidgetClass* widgetClass)
 {
     const std::string provider = context != nullptr ? *static_cast<std::string*>(context) : std::string("?");
-    switch (PluginRegistry::registerClass(widgetClass, provider))
+
+    const int libraryIndex = PluginLibrary::indexOf(provider.c_str());
+    const GoldingPluginInfo* info = libraryIndex >= 0 ? PluginLibrary::at(libraryIndex) : nullptr;
+    if (info == nullptr || info->role == nullptr || std::strcmp(info->role, "panel") != 0)
     {
-    case PluginRegistry::RegisterResult::Ok:
-        std::printf("[host] 注册组件 %s（来自 %s）\n", widgetClass->name, provider.c_str());
+        std::printf("[host] %s 不是面板插件（role=%s），不能提供界面根 → 驳回\n", provider.c_str(),
+                    info != nullptr && info->role != nullptr ? info->role : "(空)");
+        return GOLDING_REGISTER_INVALID;
+    }
+
+    switch (PanelRootRegistry::setRoot(widgetClass, provider))
+    {
+    case PanelRootRegistry::Result::Ok:
+        std::printf("[host] 面板根工厂 %s（来自 %s）\n", widgetClass->name, provider.c_str());
         return GOLDING_REGISTER_OK;
-    case PluginRegistry::RegisterResult::NameTaken:
-        std::printf("[host] 组件名冲突，驳回：%s\n", widgetClass->name);
+    case PanelRootRegistry::Result::AlreadySet:
+        std::printf("[host] 面板根工厂已存在，驳回 %s（来自 %s）\n",
+                    widgetClass != nullptr && widgetClass->name != nullptr ? widgetClass->name : "(无名)",
+                    provider.c_str());
         return GOLDING_REGISTER_NAME_TAKEN;
-    case PluginRegistry::RegisterResult::Invalid:
+    case PanelRootRegistry::Result::Invalid:
     default:
-        std::printf("[host] 组件描述不合法，驳回\n");
+        std::printf("[host] 面板根工厂描述不合法，驳回（来自 %s）\n", provider.c_str());
         return GOLDING_REGISTER_INVALID;
     }
 }
@@ -145,7 +201,9 @@ GoldingWidgetHandle hostMountPage(void* context, const char* pageId, void* paren
     {
         return nullptr;
     }
-    return page->create(context, parent);
+    // `create` 的 hostContext 属于**页面提供方**，不是调用方（面板）。查不到才退回调用方。
+    void* owner = contextOfProvider(PageRegistry::providerOf(pageId));
+    return page->create(owner != nullptr ? owner : context, parent);
 }
 
 int hostRegisterSettingsSection(void* context, const GoldingSettingsDecl* section)
@@ -193,7 +251,9 @@ GoldingWidgetHandle hostMountSettingsSection(void* context, const char* sectionI
     {
         return nullptr;
     }
-    return section->create(context, parent);
+    // 同上：区块提供方的 context，不是调用方的。
+    void* owner = contextOfProvider(SettingsRegistry::providerOf(sectionId));
+    return section->create(owner != nullptr ? owner : context, parent);
 }
 
 /**
@@ -379,7 +439,7 @@ int HostApp::notifyReady()
         int failed = 0;
         try
         {
-            failed = entry.loaded.descriptor->ready(&entry.api);
+            failed = entry.loaded.descriptor->ready(&entry.api, entry.provider.c_str());
         }
         catch (const std::exception& error)
         {
@@ -407,6 +467,15 @@ const std::string& HostApp::providerOfNode(std::size_t nodeIndex) const
     return nodeIndex < _nodes.size() ? _nodes[nodeIndex].name : unknown;
 }
 
+/**
+ * @brief 故意不做任何卸载。
+ *
+ * 装载成功的 dll 句柄归进程所有，退出时由 OS 一并回收。在这里 `FreeLibrary`
+ * 反而更危险：它会执行插件的静态析构，而五张表仍持有指向 dll 数据段的
+ * `const TDecl*`（`SlotTable::Row::decl`），谁先谁后没有一处代码能保证。
+ *
+ * 所以本类没有"卸载"这条路——重载等于重启进程（`PluginLoader.h` 的类注释）。
+ */
 HostApp::~HostApp() = default;
 
 bool HostApp::discover()
@@ -420,7 +489,7 @@ bool HostApp::discover()
 
 bool HostApp::loadEntry(LoadedEntry& entry)
 {
-    if (entry.scanned.status != ManifestStatus::Pass || !entry.scanned.manifest.hasDll)
+    if (entry.scanned.status != ManifestStatus::Pass || entry.scanned.manifest.dllPath.empty())
     {
         return false;
     }
@@ -429,7 +498,7 @@ bool HostApp::loadEntry(LoadedEntry& entry)
     if (entry.loaded.status != LoadStatus::Pass)
     {
         // 打的是 **PluginState** 的编号（和档案表同一套词），不是 LoadStatus 的下标：
-        // 两套枚举顺序不一样，混着看会让人拿着 status=4 去查"没有 dll"。
+        // 两套枚举顺序不一样，混着看会让人拿着 status=3 去查别的。
         PluginState state = PluginState::LibraryError;
         if (entry.loaded.status == LoadStatus::AbiMismatch)
         {
@@ -442,10 +511,7 @@ bool HostApp::loadEntry(LoadedEntry& entry)
         std::printf("[host] 加载失败（status=%d）：%s\n", toInt(state), entry.scanned.manifest.name.c_str());
         return false;
     }
-    if (entry.loaded.descriptor != nullptr && entry.loaded.descriptor->name != nullptr)
-    {
-        entry.provider = entry.loaded.descriptor->name;
-    }
+    // ABI v11：dll 不再自称名字，`provider` 保持 `prepare` 里设好的 `plugin.json` 名字。
     return true;
 }
 
@@ -460,25 +526,49 @@ void HostApp::validateNeeds()
             continue;
         }
         LoadedEntry& entry = _loaded[loadedIndex];
-        for (const CapabilityDecl& need : PluginLibrary::needsOf(libraryIndex))
+        for (const ManifestCapability& need : PluginLibrary::needsOf(libraryIndex))
         {
-            if (CapabilityRegistry::isDeclared(need.name.c_str()))
+            if (!CapabilityRegistry::isDeclared(need.name.c_str()))
+            {
+                if (CapabilityRegistry::strict())
+                {
+                    // 只降级它自己：硬失败会让一个能力缺席带崩整条链，而用户要的是
+                    // "一个插件坏了只影响它自己"。
+                    entry.blocked = true;
+                    PluginLibrary::setState(libraryIndex, PluginState::Unresolved);
+                    std::printf("[host] %s 缺能力 %s（没有任何插件声明提供它）→ 本插件不装配\n",
+                                entry.provider.c_str(), need.name.c_str());
+                }
+                else
+                {
+                    std::printf("[host] %s 缺能力 %s（放任模式：只留痕，照常装配）\n", entry.provider.c_str(),
+                                need.name.c_str());
+                }
+                continue;
+            }
+
+            // 有人声称提供，再比版本。提供方的版本来自 `plugin.json` 的 `provides`，
+            // 0 表示"没写版本"——不能当成"第 0 版"放行，也不能悄悄略过：
+            // 需求方明确要了版本，就该说清拿不到。
+            const unsigned int offered = CapabilityRegistry::versionOf(need.name.c_str());
+            if (need.version == 0 || offered >= need.version)
             {
                 continue;
             }
+
+            const char* declarer = CapabilityRegistry::declarerOf(need.name.c_str());
+            const char* who = declarer != nullptr ? declarer : "?";
             if (CapabilityRegistry::strict())
             {
-                // 只降级它自己：硬失败会让一个能力缺席带崩整条链，而用户要的是
-                // "一个插件坏了只影响它自己"。
                 entry.blocked = true;
                 PluginLibrary::setState(libraryIndex, PluginState::Unresolved);
-                std::printf("[host] %s 缺能力 %s（没有任何插件声明提供它）→ 本插件不装配\n",
-                            entry.provider.c_str(), need.name.c_str());
+                std::printf("[host] %s 需要能力 %s ≥ v%u，但 %s 只提供 v%u（0 = 未声明版本）→ 本插件不装配\n",
+                            entry.provider.c_str(), need.name.c_str(), need.version, who, offered);
             }
             else
             {
-                std::printf("[host] %s 缺能力 %s（放任模式：只留痕，照常装配）\n", entry.provider.c_str(),
-                            need.name.c_str());
+                std::printf("[host] %s 需要能力 %s ≥ v%u，但 %s 只提供 v%u（0 = 未声明版本；放任模式：只留痕）\n",
+                            entry.provider.c_str(), need.name.c_str(), need.version, who, offered);
             }
         }
     }
@@ -496,16 +586,17 @@ void HostApp::validateProvides()
         {
             continue;
         }
-        for (const std::string& name : PluginLibrary::providesOf(libraryIndex))
+        for (const ManifestCapability& offer : PluginLibrary::providesOf(libraryIndex))
         {
-            const char* provider = CapabilityRegistry::providerOf(name.c_str());
+            const char* provider = CapabilityRegistry::providerOf(offer.name.c_str());
             if (provider != nullptr && std::strcmp(provider, entry.provider.c_str()) == 0)
             {
                 continue;
             }
             entry.entryOk = false; // 让 selectPanel / notifyReady 也跳过它
             PluginLibrary::setState(libraryIndex, PluginState::EntryFailed);
-            std::printf("[host] %s 声明了能力 %s 但未注册 → 本插件判失败\n", entry.provider.c_str(), name.c_str());
+            std::printf("[host] %s 声明了能力 %s 但未注册 → 本插件判失败\n", entry.provider.c_str(),
+                        offer.name.c_str());
         }
     }
 
@@ -524,6 +615,20 @@ void HostApp::validateProvides()
 
 bool HostApp::prepare()
 {
+    // 只允许一次。重复调用不会崩溃，但会**静默地**留下半个旧世界：
+    // `_loaded` / `_nodes` / `_nodeToLoaded` 都是追加的，第二轮会把同一批插件
+    // 再装一遍（dll 引用计数 +1、entry 再调一次、注册全被驳回判 EntryFailed），
+    // 而 `_libraryIndex` 按新长度重置后只有后一半被填。
+    //
+    // 与其清空三个容器假装支持重入，不如直接拒绝：重载 = 重启进程，进程内
+    // 没有"重新扫描"这条路（界面树还是旧的，清了也白清）。
+    if (_prepared)
+    {
+        std::printf("[host] prepare 只能调用一次：重载 = 重启进程，不支持进程内重扫\n");
+        return false;
+    }
+    _prepared = true;
+
     const auto scanned = PluginScanner::scan(_plugins.sources);
 
     // deque：hostContext 指向 &entry.provider，vector 扩容会把指针搬走。
@@ -536,9 +641,9 @@ bool HostApp::prepare()
             continue;
         }
 
-        std::printf("[host] 扫描到 %-12s %s status=%d role=%s dll=%d\n", plugin.manifest.name.c_str(),
+        std::printf("[host] 扫描到 %-12s %s status=%d role=%s\n", plugin.manifest.name.c_str(),
                     plugin.tier == PluginTier::Bundled ? "内置" : "外部", static_cast<int>(plugin.status),
-                    plugin.manifest.role.empty() ? "-" : plugin.manifest.role.c_str(), plugin.manifest.hasDll ? 1 : 0);
+                    plugin.manifest.role.empty() ? "-" : plugin.manifest.role.c_str());
 
         // 读不出来的插件名可能为空（名字正是读不出来的那一段之一），所以原因行按目录名点人。
         if (plugin.status != ManifestStatus::Pass && !plugin.detail.empty())
@@ -585,10 +690,6 @@ bool HostApp::prepare()
         {
             state = PluginState::ApiTooNew;
         }
-        else if (!entry.scanned.manifest.hasDll)
-        {
-            state = PluginState::NoDll;
-        }
         else if (entry.loaded.status == LoadStatus::AbiMismatch)
         {
             state = PluginState::AbiMismatch;
@@ -602,47 +703,26 @@ bool HostApp::prepare()
             state = PluginState::LibraryError;
         }
 
-        const char* const* depends = nullptr;
-        std::size_t dependCount = 0;
-        if (entry.loaded.descriptor != nullptr && entry.loaded.descriptor->dependCount > 0)
-        {
-            depends = entry.loaded.descriptor->depends;
-            dependCount = entry.loaded.descriptor->dependCount;
-        }
-
-        // ---- ABI v9：静态能力宣言 ----
-        //
-        // `manifest()` 指向的存储由插件持有、活到进程结束，宿主**原样读、不拷贝**；
-        // 要留下的字符串都由 PluginLibrary 自己复制一份。
-        const GoldingPluginManifest* declared =
-            (entry.loaded.descriptor != nullptr && entry.loaded.descriptor->manifest != nullptr)
-                ? entry.loaded.descriptor->manifest()
-                : nullptr;
+        // 依赖来自 `plugin.json`（ABI v11）：扫描阶段就有，拓扑不必等 dll。
+        // 这份数据的唯一权威就是它——descriptor 里那个 `depends` 已随 v11 删除。
+        const std::vector<std::string>& depends = entry.scanned.manifest.dependencies;
 
         ManifestFacts facts;
-        if (declared != nullptr)
-        {
-            facts.kind = declared->kind;
-            facts.provides = declared->provides;
-            facts.provideCount = declared->provideCount;
-            facts.needs = declared->needs;
-            facts.needCount = declared->needCount;
-        }
         if (entry.loaded.descriptor != nullptr)
         {
             facts.sdkId = entry.loaded.descriptor->sdkId;
             facts.sdkVersion = entry.loaded.descriptor->sdkVersion;
         }
+        // 能力声明同样只认 `plugin.json`：版本校验发生在拓扑整理时，那时 dll 还没 entry。
+        facts.provides = &entry.scanned.manifest.provides;
+        facts.needs = &entry.scanned.manifest.needs;
 
-        const char* descriptorName = entry.loaded.descriptor != nullptr ? entry.loaded.descriptor->name : nullptr;
-        const char* descriptorVersion = entry.loaded.descriptor != nullptr ? entry.loaded.descriptor->version : nullptr;
         const int descriptorAbi =
             entry.loaded.descriptor != nullptr ? static_cast<int>(entry.loaded.descriptor->abiVersion) : 0;
 
-        PluginLibrary::add(descriptorName != nullptr ? descriptorName : entry.scanned.manifest.name.c_str(),
-                           entry.scanned.manifest.title.c_str(),
-                           descriptorVersion != nullptr ? descriptorVersion : entry.scanned.manifest.version.c_str(),
-                           entry.scanned.manifest.role.c_str(), descriptorAbi, state, depends, dependCount, facts);
+        PluginLibrary::add(entry.scanned.manifest.name.c_str(), entry.scanned.manifest.title.c_str(),
+                           entry.scanned.manifest.version.c_str(), entry.scanned.manifest.role.c_str(),
+                           descriptorAbi, state, depends, facts);
         _libraryIndex[index] = PluginLibrary::count() - 1;
 
         // 目录由扫描结果决定（内置/外部分层、同名 shadowed 都在这一步之前已经定完），
@@ -655,24 +735,16 @@ bool HostApp::prepare()
             continue;
         }
 
-        // 声明面：只有名字，没有 vtable——装配前能读到，所以"要的能力有没有人**声称**
-        // 提供"可以在 entry 之前就判出来。
-        for (std::size_t provideIndex = 0; provideIndex < facts.provideCount; ++provideIndex)
+        // 声明面：名字 + 版本，没有 vtable——扫描完就能读，所以"要的能力有没有人
+        // **声称**提供、提供到第几版"可以在 entry 之前就判出来。
+        for (const ManifestCapability& offer : entry.scanned.manifest.provides)
         {
-            if (facts.provides != nullptr)
-            {
-                CapabilityRegistry::declare(facts.provides[provideIndex],
-                                            descriptorName != nullptr ? descriptorName
-                                                                      : entry.scanned.manifest.name.c_str());
-            }
+            CapabilityRegistry::declare(offer.name.c_str(), offer.version, entry.scanned.manifest.name.c_str());
         }
 
         PluginNode node;
-        node.name = descriptorName != nullptr ? descriptorName : entry.scanned.manifest.name;
-        for (std::size_t dependIndex = 0; dependIndex < dependCount; ++dependIndex)
-        {
-            node.depends.emplace_back(depends[dependIndex]);
-        }
+        node.name = entry.scanned.manifest.name;
+        node.depends = depends;
         _nodes.push_back(std::move(node));
         _nodeToLoaded.push_back(index);
     }
@@ -684,12 +756,40 @@ bool HostApp::prepare()
     validateNeeds();
 
     // 依赖解析的结论回灌：装不上的插件在档案里要如实反映（此前记着 Ready）。
+    // 三种原因分开打——"缺依赖""在环上""被连累"的处置一样，但责任人不同，
+    // 排查时第一条要看的正是这个。
     for (const auto& item : _resolved.unresolved)
     {
         const std::size_t loadedIndex = _nodeToLoaded[item.index];
         if (_libraryIndex[loadedIndex] >= 0)
         {
             PluginLibrary::setState(_libraryIndex[loadedIndex], PluginState::Unresolved);
+        }
+
+        const std::string& name = _nodes[item.index].name;
+        switch (item.reason)
+        {
+        case ResolveReason::MissingDependency:
+        {
+            std::string missing;
+            for (const std::string& dependency : item.missing)
+            {
+                if (!missing.empty())
+                {
+                    missing += "、";
+                }
+                missing += dependency;
+            }
+            std::printf("[host] %s 缺依赖：%s（没有任何插件用这个名字）→ 不装配\n", name.c_str(),
+                        missing.c_str());
+            break;
+        }
+        case ResolveReason::InCycle:
+            std::printf("[host] %s 在依赖环上 → 不装配（先拆环，别查它的依赖）\n", name.c_str());
+            break;
+        case ResolveReason::DependencyUnavailable:
+            std::printf("[host] %s 依赖的插件装不上（连带）→ 不装配（往上找根因）\n", name.c_str());
+            break;
         }
     }
 
@@ -698,6 +798,9 @@ bool HostApp::prepare()
 
 void HostApp::registerAll()
 {
+    // provider 名字 → hostContext 的映射逐次重建（`registerAll` 可能被调多次）。
+    providerContexts().clear();
+
     for (const std::size_t orderIndex : _resolved.order)
     {
         const std::size_t loadedIndex = _nodeToLoaded[orderIndex];
@@ -707,6 +810,8 @@ void HostApp::registerAll()
             continue;
         }
         fillHostApi(entry.api, &entry.provider);
+        // 记下这个插件自己的 context，供 `mountPage` 反查提供方（见 contextOfProvider）。
+        providerContexts().emplace_back(entry.provider, entry.api.hostContext);
 
         // 兜底：插件抛出的 C++ 异常不许带走宿主。
         //
@@ -714,12 +819,12 @@ void HostApp::registerAll()
         //   1. 结构化异常（SEH：空指针写、栈溢出、除零）在 MinGW 下不经过 catch(...)；
         //   2. 异常要穿过 dll 边界，两侧必须用同一个运行库。插件静态链 libstdc++ 时，
         //      抛出点直接 terminate，宿主的 catch 根本看不到。
-        // 所以这是"尽力兜底"，不是"插件隔离"（`docs/Options.md` §11）。
+        // 所以这是"尽力兜底"，不是"插件隔离"（`docs/Options.md`）。
         bool threw = false;
         std::string reason;
         try
         {
-            entry.entryOk = PluginLoader::callEntry(entry.loaded.library, &entry.api);
+            entry.entryOk = PluginLoader::callEntry(entry.loaded.library, &entry.api, entry.provider.c_str());
         }
         catch (const std::exception& error)
         {

@@ -6,33 +6,28 @@
 #include <vector>
 
 #include "Application/PluginState.h"
+#include "DataStruct/Manifest.h"
 #include "sdk/golding_plugin.h"
 
 namespace golding
 {
 
-/**一条能力需求的宿主副本（名字已拷贝，指针全程有效）。*/
-struct CapabilityDecl
-{
-    std::string name;
-    unsigned int minVersion = 0;
-};
-
 /**
- * @brief 插件静态宣言里宿主关心的那几项（ABI v9 的 `manifest()`）。
+ * @brief 插件静态宣言里宿主关心的那几项。
  *
  * 与 `GoldingPluginInfo` 分开：那个是**跨 dll 的 C 结构**（插件会读），
  * 这些只是宿主自己的记账，加字段不算 ABI 事件。
+ *
+ * `provides` / `needs` **来自 `plugin.json`**（扫描阶段可读），不是 descriptor——
+ * 这样能力表连同版本在 entry 之前就是完整的。`kind` / `sdkId` / `sdkVersion`
+ * 仍来自 descriptor。
  */
 struct ManifestFacts
 {
-    const char* kind = "";
     const char* sdkId = "";
     const char* sdkVersion = "";
-    const char* const* provides = nullptr;
-    std::size_t provideCount = 0;
-    const GoldingCapabilityNeed* needs = nullptr;
-    std::size_t needCount = 0;
+    const std::vector<ManifestCapability>* provides = nullptr;
+    const std::vector<ManifestCapability>* needs = nullptr;
 };
 
 /**
@@ -47,8 +42,7 @@ class PluginLibrary
 public:
     /**登记一个插件。所有字符串都会被拷贝一份，调用方不必持有。*/
     static void add(const char* name, const char* title, const char* version, const char* role, int abiVersion,
-                    PluginState state, const char* const* depends, std::size_t dependCount,
-                    const ManifestFacts& facts = ManifestFacts{});
+                    PluginState state, const std::vector<std::string>& depends, const ManifestFacts& facts);
 
     /**
      * 改一个已登记插件的状态。
@@ -67,16 +61,13 @@ public:
     /**第 index 个插件的依赖名。*/
     static const std::vector<std::string>& dependsOf(int index);
 
-    // ---- ABI v9：静态宣言里的那几项（越界返回空值，不抛）----
-
-    /**`kind` 自由字符串，core 只展示不解释。*/
-    static const char* kindOf(int index);
+    // ---- 静态宣言里那几项（`plugin.json` 的 provides / needs，descriptor 的 sdkId）----
 
     /**`"<sdkId>/<sdkVersion>"`，档案那一行直接打它。*/
     static const char* sdkOf(int index);
 
-    static const std::vector<std::string>& providesOf(int index);
-    static const std::vector<CapabilityDecl>& needsOf(int index);
+    static const std::vector<ManifestCapability>& providesOf(int index);
+    static const std::vector<ManifestCapability>& needsOf(int index);
 
     // ---- 插件目录（ABI v10）----
 

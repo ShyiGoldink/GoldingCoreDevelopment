@@ -7,6 +7,7 @@
 #endif
 
 #include "Application/PluginLoader.h"
+#include "Tool/PathFinder.h"
 
 namespace golding
 {
@@ -62,6 +63,10 @@ LoadedPlugin PluginLoader::open(const std::filesystem::path& dllPath, unsigned i
         return loaded;
     }
 
+    // ABI v11：descriptor 里已经没有名字了，日志用 dll 路径点名——那时插件还没 entry，
+    // 正好也不需要它的名字。
+    const std::string label = PathFinder::toUtf8(dllPath);
+
     // ABI 闸门：不匹配就地返回，绝不进 C++。
     if (descriptor->abiVersion != expectedAbi)
     {
@@ -77,19 +82,17 @@ LoadedPlugin PluginLoader::open(const std::filesystem::path& dllPath, unsigned i
     // 而把检查写在 strcmp 后面会让它从"检查"变成"崩溃"。
     if (descriptor->sdkId == nullptr || std::strcmp(descriptor->sdkId, GOLDING_SDK_ID) != 0)
     {
-        std::printf("[host] sdkId 不匹配，拒绝加载：%s（期望 %s，实际 %s）\n",
-                    descriptor->name != nullptr ? descriptor->name : "(无名)", GOLDING_SDK_ID,
+        std::printf("[host] sdkId 不匹配，拒绝加载：%s（期望 %s，实际 %s）\n", label.c_str(), GOLDING_SDK_ID,
                     descriptor->sdkId != nullptr ? descriptor->sdkId : "(空)");
         FreeLibrary(static_cast<HMODULE>(library));
         loaded.status = LoadStatus::SdkMismatch;
         return loaded;
     }
 
-    // sdkVersion 只记不拒（实验期编译栈未定，见 docs/Options.md §1）。
+    // sdkVersion 只记不拒（实验期编译栈未定）。
     if (descriptor->sdkVersion == nullptr || std::strcmp(descriptor->sdkVersion, GOLDING_SDK_VERSION) != 0)
     {
-        std::printf("[host] %s 的 SDK 版本差异：期望 %s，实际 %s（放行）\n",
-                    descriptor->name != nullptr ? descriptor->name : "(无名)", GOLDING_SDK_VERSION,
+        std::printf("[host] %s 的 SDK 版本差异：期望 %s，实际 %s（放行）\n", label.c_str(), GOLDING_SDK_VERSION,
                     descriptor->sdkVersion != nullptr ? descriptor->sdkVersion : "(空)");
     }
 
@@ -105,7 +108,7 @@ LoadedPlugin PluginLoader::open(const std::filesystem::path& dllPath, unsigned i
     return loaded;
 }
 
-bool PluginLoader::callEntry(void* library, const GoldingHostApi* hostApi)
+bool PluginLoader::callEntry(void* library, const GoldingHostApi* hostApi, const char* pluginName)
 {
 #ifdef _WIN32
     if (library == nullptr)
@@ -117,23 +120,12 @@ bool PluginLoader::callEntry(void* library, const GoldingHostApi* hostApi)
     {
         return false;
     }
-    return entryFn(hostApi) == 0;
+    return entryFn(hostApi, pluginName) == 0;
 #else
     (void)library;
     (void)hostApi;
+    (void)pluginName;
     return false;
-#endif
-}
-
-void PluginLoader::close(void* library)
-{
-#ifdef _WIN32
-    if (library != nullptr)
-    {
-        FreeLibrary(static_cast<HMODULE>(library));
-    }
-#else
-    (void)library;
 #endif
 }
 

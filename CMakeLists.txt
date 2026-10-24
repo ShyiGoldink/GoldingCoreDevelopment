@@ -1,8 +1,8 @@
 # 根 CMakeLists：**只有 core 与它的单测**。
 #
 # 这个文件里的每一行都必须在"没有 host/、没有 plugins/、没有 InkingUIKit"的检出里成立——
-# 它就是插件开发包的全部构建入口（`docs/Options.md` §13）。宿主与插件在 `host/`、
-# `plugins/` 两个子目录里，由下面那个 `if` 决定要不要加进来。
+# 它就是插件开发包的全部构建入口（用法见 `README.md` 的「快速开始」）。宿主与插件在
+# `host/`、`plugins/` 两个子目录里，由下面那个 `if` 决定要不要加进来。
 cmake_minimum_required(VERSION 3.22)
 
 project(GoldingCore VERSION 0.2.0 LANGUAGES CXX)
@@ -33,7 +33,7 @@ add_library(golding_core STATIC
     src/Application/Json.cpp
     src/Application/ManifestLoader.cpp
     src/Application/HostApp.cpp
-    src/Application/PluginRegistry.cpp
+    src/Application/PanelRootRegistry.cpp
     src/Application/PageRegistry.cpp
     src/Application/SettingsRegistry.cpp
     src/Application/RegionRegistry.cpp
@@ -93,7 +93,7 @@ option(GOLDING_WITH_INKING "链接 InkingUIKit（用到 window / scene / widget 
 if (GOLDING_WITH_INKING)
     # `host/` 存在 = 这是一个"完整仓库"的检出；不存在 = 开发包检出（只有 include/ src/ tests/ cmakes/）。
     # 判据用文件存在而不是选项，是因为"缺目录"是事实，"忘了关选项"是人为失误——前者不该让
-    # configure 失败在这里。见 `docs/Options.md` §13。
+    # configure 失败在这里。见 `docs/NOTES.md` 的「构建」。
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/host/CMakeLists.txt")
         add_subdirectory(host)
     else()

@@ -13,7 +13,7 @@ namespace golding
 /**
  * @brief 页面登记表：页面 id → 插件提供的页面描述。
  *
- * 与 `PluginRegistry` 同一套路：静态类 + 函数内静态量、同 id 驳回。
+ * 与 `PanelRootRegistry` 同一套路：静态类 + 函数内静态量、同 id 驳回。
  * 骨架插件通过 HostApi 的 pageCount / pageAt 读它来生成导航。
  */
 class PageRegistry

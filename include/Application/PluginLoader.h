@@ -29,6 +29,10 @@ struct LoadedPlugin
  * @brief dll 的三步：打开 → 比对 ABI → 调 entry。
  *
  * **先比 ABI 再进 C++**：ABI 不对时调用 entry 的表现是崩溃，不是报错。
+ *
+ * **只负责装载，不提供卸载**：成功装载的句柄归进程所有，退出时由 OS 回收。
+ * 进程内卸载缺三件前置（销毁界面树、插件的反注册契约、进程级静态量复位），
+ * 所以本项目的"重载"只有一种实现——重启进程（`docs/Options.md` 的「不卸载」）。
  */
 class PluginLoader
 {
@@ -36,11 +40,12 @@ public:
     /**打开库并读取 descriptor，比对 abiVersion。失败时已自动释放句柄。*/
     static LoadedPlugin open(const std::filesystem::path& dllPath, unsigned int expectedAbi);
 
-    /**调用 golding_plugin_entry；返回 true 表示插件成功完成注册。*/
-    static bool callEntry(void* library, const GoldingHostApi* hostApi);
-
-    /**释放库句柄（只支持整体重加载，不单独卸载）。*/
-    static void close(void* library);
+    /**
+     * @brief 调用 `golding_plugin_entry`；返回 true 表示插件成功完成注册。
+     *
+     * `pluginName` 来自 `plugin.json`（ABI v11 起 dll 不再自称名字），插件拿它做日志前缀。
+     */
+    static bool callEntry(void* library, const GoldingHostApi* hostApi, const char* pluginName);
 };
 
 } // namespace golding

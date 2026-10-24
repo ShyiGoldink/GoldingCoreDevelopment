@@ -16,10 +16,9 @@ struct Entry
     GoldingPluginInfo info{};
     std::vector<std::string> depends;
     /**ABI v9 的静态宣言副本。*/
-    const char* kind = "";
     const char* sdk = "";
-    std::vector<std::string> provides;
-    std::vector<CapabilityDecl> needs;
+    std::vector<ManifestCapability> provides;
+    std::vector<ManifestCapability> needs;
     /**插件被扫描到的目录（UTF-8 绝对路径）；空 = 没登记过。*/
     std::string directory;
 };
@@ -44,8 +43,7 @@ const char* keep(const char* text)
 } // namespace
 
 void PluginLibrary::add(const char* name, const char* title, const char* version, const char* role, int abiVersion,
-                        PluginState state, const char* const* depends, std::size_t dependCount,
-                        const ManifestFacts& facts)
+                        PluginState state, const std::vector<std::string>& depends, const ManifestFacts& facts)
 {
     Entry entry;
     entry.info.name = keep(name);
@@ -55,33 +53,22 @@ void PluginLibrary::add(const char* name, const char* title, const char* version
     entry.info.abiVersion = abiVersion;
     entry.info.state = toInt(state);
 
-    for (std::size_t index = 0; index < dependCount; ++index)
-    {
-        if (depends != nullptr && depends[index] != nullptr)
-        {
-            entry.depends.emplace_back(depends[index]);
-        }
-    }
+    entry.depends = depends;
 
-    entry.kind = keep(facts.kind);
     // 两份拼成一行：档案输出要的是"这套插件是给哪个 SDK 的哪个版本编的"，
     // 分开存反而要多两列。空 sdkId 说明插件没填（v9 之后不该发生）。
     const std::string sdk = std::string(facts.sdkId != nullptr ? facts.sdkId : "") + "/" +
                             std::string(facts.sdkVersion != nullptr ? facts.sdkVersion : "");
     entry.sdk = keep(sdk.c_str());
-    for (std::size_t index = 0; index < facts.provideCount; ++index)
+    // 能力声明直接拷 `plugin.json` 那份（名字 + 版本），不指向扫描结果——
+    // 扫描结果会随 `prepare` 的局部量消失。
+    if (facts.provides != nullptr)
     {
-        if (facts.provides != nullptr && facts.provides[index] != nullptr)
-        {
-            entry.provides.emplace_back(facts.provides[index]);
-        }
+        entry.provides = *facts.provides;
     }
-    for (std::size_t index = 0; index < facts.needCount; ++index)
+    if (facts.needs != nullptr)
     {
-        if (facts.needs != nullptr && facts.needs[index].name != nullptr)
-        {
-            entry.needs.push_back(CapabilityDecl{facts.needs[index].name, facts.needs[index].minVersion});
-        }
+        entry.needs = *facts.needs;
     }
 
     entries().push_back(std::move(entry));
@@ -126,15 +113,6 @@ const std::vector<std::string>& PluginLibrary::dependsOf(int index)
     return entries()[static_cast<std::size_t>(index)].depends;
 }
 
-const char* PluginLibrary::kindOf(int index)
-{
-    if (index < 0 || static_cast<std::size_t>(index) >= entries().size())
-    {
-        return "";
-    }
-    return entries()[static_cast<std::size_t>(index)].kind;
-}
-
 const char* PluginLibrary::sdkOf(int index)
 {
     if (index < 0 || static_cast<std::size_t>(index) >= entries().size())
@@ -144,9 +122,9 @@ const char* PluginLibrary::sdkOf(int index)
     return entries()[static_cast<std::size_t>(index)].sdk;
 }
 
-const std::vector<std::string>& PluginLibrary::providesOf(int index)
+const std::vector<ManifestCapability>& PluginLibrary::providesOf(int index)
 {
-    static const std::vector<std::string> empty;
+    static const std::vector<ManifestCapability> empty;
     if (index < 0 || static_cast<std::size_t>(index) >= entries().size())
     {
         return empty;
@@ -154,9 +132,9 @@ const std::vector<std::string>& PluginLibrary::providesOf(int index)
     return entries()[static_cast<std::size_t>(index)].provides;
 }
 
-const std::vector<CapabilityDecl>& PluginLibrary::needsOf(int index)
+const std::vector<ManifestCapability>& PluginLibrary::needsOf(int index)
 {
-    static const std::vector<CapabilityDecl> empty;
+    static const std::vector<ManifestCapability> empty;
     if (index < 0 || static_cast<std::size_t>(index) >= entries().size())
     {
         return empty;

@@ -10,10 +10,11 @@ namespace golding
 namespace
 {
 
-/**声明面的一行：名字 + 声称提供它的插件。字符串存在 deque 里，指针全程有效。*/
+/**声明面的一行：名字 + 版本 + 声称提供它的插件。字符串是拷贝，指针全程有效。*/
 struct Declaration
 {
     std::string name;
+    unsigned int version = 0;
     std::string declarer;
 };
 
@@ -76,7 +77,7 @@ const ProviderRow* findProvider(const char* name)
 
 } // namespace
 
-void CapabilityRegistry::declare(const char* name, const char* declarer)
+void CapabilityRegistry::declare(const char* name, unsigned int version, const char* declarer)
 {
     if (name == nullptr || name[0] == '\0')
     {
@@ -86,12 +87,18 @@ void CapabilityRegistry::declare(const char* name, const char* declarer)
     {
         return; // 同名重复声明：第一个说了算，后面的不覆盖
     }
-    declarations().push_back(Declaration{name, declarer != nullptr ? declarer : "?"});
+    declarations().push_back(Declaration{name, version, declarer != nullptr ? declarer : "?"});
 }
 
 bool CapabilityRegistry::isDeclared(const char* name)
 {
     return findDeclaration(name) != nullptr;
+}
+
+unsigned int CapabilityRegistry::versionOf(const char* name)
+{
+    const Declaration* row = findDeclaration(name);
+    return row != nullptr ? row->version : 0;
 }
 
 const char* CapabilityRegistry::declarerOf(const char* name)

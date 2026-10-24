@@ -130,6 +130,8 @@ private:
     std::vector<int> _libraryIndex;
     ResolveResult _resolved;
     const LoadedEntry* _panel = nullptr;
+    /**`prepare` 只能成功一次。见实现处的注释：重复调用会静默留下半个旧世界。*/
+    bool _prepared = false;
 };
 
 } // namespace golding

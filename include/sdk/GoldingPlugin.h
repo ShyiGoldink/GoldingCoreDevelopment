@@ -2,9 +2,9 @@
 
 // SDK 的 C++ 面（第一层）：插件作者继承的基类 + 宿主能力入口。
 //
-// 两条不变量（`docs/Options.md` §8、§3）：
+// 两条不变量（`docs/Options.md`）：
 //
-//   1. `Plugin` **只有三个钩子 + 虚析构**，发布后只许末尾追加。基类由插件作者继承，
+//   1. `Plugin` **只有两个钩子 + 虚析构**，发布后只许末尾追加。基类由插件作者继承，
 //      中间插一个虚函数会让所有旧插件的虚表错位。
 //   2. 所有注册面长在 `Host` 上（宿主侧 C 结构体末尾追加）。加一种新注册不动任何
 //      插件的虚表——这跟 `GoldingHostApi` 已经走过的 v5→v8 是同一套做法。
@@ -21,12 +21,14 @@
 //   class HomePlugin final : public golding::Plugin
 //   {
 //   public:
-//       const golding::PluginManifest& Manifest() const override;
 //       bool Register(golding::Host& host) override;
 //       int Ready(const golding::Host& host) override;   // 可选
 //   };
 //
 //   GOLDING_EXPORT_PLUGIN(HomePlugin)
+//
+// 插件的**静态描述**（名字 / 版本 / 类型 / 依赖 / 能力）全部写在 `plugin.json`，
+// 代码里一个字都不写。ABI v11 起 dll 只负责"内容"：怎么注册、装配完断言什么。
 
 #include <sdk/golding_plugin.h>
 
@@ -43,41 +45,13 @@ namespace golding
 
 class Host;
 
-/**
- * @brief 一条能力需求：要哪个名字、至少哪个版本。
- *
- * 只有名字与最小版本，**不带 vtable**：静态声明在装配前就要能比对，而 vtable
- * 是运行时事实（见 `docs/TASK-CORE-UPING.md` T-02 的选型修正）。
- */
-using CapabilityNeed = GoldingCapabilityNeed;
-
-/**
- * @brief 插件对自己的静态描述。装配**之前**就能读到。
- *
- * 字段与 C 版 `GoldingPluginManifest` 一一对应，**直接用 C 结构当存储**：
- * descriptor 的 `manifest()` 返回的就是它，宿主原样读，不经过任何 C++ 类型。
- *
- * 为什么身份（name / version / rootWidgetClass）也在这里：descriptor 的那三个
- * 字段总得有个来源，而基类只许三个钩子、不能再开一个 `Identity()`。
- *
- * `kind` 是自由字符串，**core 不解释它**，只存、只展示。一旦 core 认识 `"panel"`
- * 以外的 kind，就会长出第二张特化表（`PageRegistry` / `SettingsRegistry` 并存
- * 那笔账的起因）。
- *
- * 它是聚合类型且字段无默认值，所以作者只写关心的几项即可（其余按 nullptr / 0）：
- * @code
- * static const golding::PluginManifest kManifest = {
- *     .name = "home", .version = "0.1.0", .kind = "page",
- *     .depends = kDepends, .dependCount = 1,
- * };
- * @endcode
- */
-using PluginManifest = GoldingPluginManifest;
+// 静态描述（PluginManifest / CapabilityNeed）已随 ABI v11 删除：
+// 名字、版本、类型、依赖、能力全部写在 `plugin.json`，那里的数据在扫描阶段就可读。
 
 /**
  * @brief 宿主能力的 C++ 入口。**每调用一次都留一行日志。**
  *
- * 留痕不是装饰：插件在进程内、崩了不隔离（`docs/Options.md` §2 用户已明确接受），
+ * 留痕不是装饰：插件在进程内、崩了不隔离（`docs/Options.md` 用户已明确接受），
  * 日志是唯一排查面。所以每次注册、每次能力查询都必须能回答
  * "谁、往哪张表、什么结果"。
  *
@@ -114,6 +88,16 @@ public:
 
     // ---- 注册面：往宿主登记自己的东西 ----
 
+    /**
+     * @brief 交出"怎么建界面根"。**只有 `role: "panel"` 的插件能调**。
+     *
+     * 宿主只留一个槽位：非面板插件调会被驳回，第二次调同样驳回（返回 `false`）。
+     * 名字里的 `WidgetClass` 是历史包袱——`configName` 参数已随 `widgets{}` 废弃，
+     * 这里实际只有一个用途：提供界面骨架的根。
+     *
+     * @note 重复设置的驳回在 C 侧返回 `GOLDING_REGISTER_NAME_TAKEN`（不新增返回码），
+     *       所以插件日志会说"名字已被占用"；真正的原因由宿主日志点名"面板根已存在"。
+     */
     bool AddWidgetClass(const GoldingWidgetClass& widgetClass) const
     {
         return report("组件类", widgetClass.name,
@@ -291,10 +275,10 @@ public:
     /**
      * @brief 按名字取一个服务（能力目录的前身：现在就是服务表）。
      *
-     * 三种结果在日志里必须可区分（`docs/Options.md` §1 的检查点）：
+     * 三种结果在日志里必须可区分（`docs/Options.md` 的检查点）：
      *   - `缺能力`：没人提供 → 返回 nullptr，调用方自己降级；
      *   - `版本不足（放行）`：拿到了，但对方 abiVersion 低于 minVersion——
-     *     实验期仍返回（解除条件见 Options §1）；
+     *     实验期仍返回（解除条件见 `docs/Options.md`）；
      *   - `取用`：正常。
      *
      * @tparam T 服务结构体，首字段必须是 `abiVersion`。
@@ -370,24 +354,23 @@ private:
 };
 
 /**
- * @brief 插件基类。**三个钩子 + 虚析构，之后冻结。**
+ * @brief 插件基类。**两个钩子 + 虚析构，之后冻结。**
+ *
+ * ABI v11 起没有 `Manifest()`：静态描述全部在 `plugin.json`。这里只剩"行为"。
  *
  * 为什么不在这里放 AddPage / Query 之类的便利方法：那样每加一种注册都是 ABI 事件
- * （见 `docs/Options.md` §8）。能力全部长在 `Host` 上。
+ * （见 `docs/Options.md`）。能力全部长在 `Host` 上。
  */
 class Plugin
 {
 public:
     virtual ~Plugin() = default;
 
-    /**静态描述。装配前读，必须活到进程结束（常量或成员的引用都行）。*/
-    virtual const PluginManifest& Manifest() const = 0;
-
     /**注册。返回 false = 插件自己认为没装成（宿主会把状态记成 `EntryFailed`）。*/
     virtual bool Register(Host& host) = 0;
 
     /**
-     * 装配之后（ABI v8 的 `ready`）：骨架建完、页面挂上之后再调一次。
+     * 装配之后（descriptor 的 `ready`）：骨架建完、页面挂上之后再调一次。
      * 返回**失败项数**，0 = 全绿。不重写就等于"没什么可断言的"。
      */
     virtual int Ready(const Host& host)
@@ -403,11 +386,10 @@ namespace detail
 /**
  * 本 dll 里那**一个**插件对象。
  *
- * 函数内 static：`entry` 之前就构造好，而 `descriptor()` 也在 `entry` 之前被宿主调用
- * （`PluginLoader::open` 的顺序），两边拿到的是同一个对象。
+ * 函数内 static：第一次 `entry` / `ready` 时构造，同一 dll 的两个钩子拿到同一个对象。
+ * ABI v11 起 `descriptor()` 不再碰它——描述全在 `plugin.json`，那一步不需要插件实例。
  *
- * 约束：`T` 的构造函数**不能依赖任何运行时状态**——否则会退化成"在 descriptor 里
- * 构造插件对象"，那时插件连 `Host` 都还没拿到。
+ * 约束：`T` 的构造函数**不能依赖任何运行时状态**（那时插件连 `Host` 都还没拿到）。
  */
 template <typename T>
 T& SharedInstance()
@@ -416,82 +398,60 @@ T& SharedInstance()
     return instance;
 }
 
-// BuildDescriptor 里的 `ready` / `manifest` 指向下面两个 thunk，必须先声明。
+// descriptor 里的 `ready` 与导出函数都指向下面的 thunk，必须先声明。
 template <typename T>
-int EntryThunk(const GoldingHostApi* api);
+int EntryThunk(const GoldingHostApi* api, const char* pluginName);
 
 template <typename T>
-int ReadyThunk(const GoldingHostApi* api);
+int ReadyThunk(const GoldingHostApi* api, const char* pluginName);
 
-template <typename T>
-const GoldingPluginManifest* ManifestThunk();
-
-/**填 descriptor。前七个字段与 v8 一模一样，v9 只在**末尾**追加三项。*/
+/**
+ * @brief 填 descriptor。ABI v11：只剩二进制身份 + `ready`。
+ *
+ * 名字 / 版本 / 依赖 / 能力都不在这里——它们在 `plugin.json`。所以这个函数
+ * **不需要构造插件对象**，纯编译期常量拼装。
+ */
 template <typename T>
 const GoldingPluginDescriptor* BuildDescriptor()
 {
     static const GoldingPluginDescriptor descriptor = [] {
-        const PluginManifest& manifest = SharedInstance<T>().Manifest();
         GoldingPluginDescriptor built{};
         built.abiVersion = GOLDING_PLUGIN_ABI_VERSION;
-        built.name = manifest.name != nullptr ? manifest.name : "";
-        built.version = manifest.version != nullptr ? manifest.version : "";
-        built.rootWidgetClass = manifest.rootWidgetClass != nullptr ? manifest.rootWidgetClass : "";
-        built.depends = manifest.depends;
-        built.dependCount = manifest.dependCount;
-        built.ready = &ReadyThunk<T>;
-
-        // v9：能力宣言与 SDK 身份。sdkId / sdkVersion 由编译期常量填，作者不写——
-        // "我在哪套 SDK 下编译"是客观事实，手写必然有人写错。
-        built.manifest = &ManifestThunk<T>;
         built.sdkId = GOLDING_SDK_ID;
         built.sdkVersion = GOLDING_SDK_VERSION;
+        built.ready = &ReadyThunk<T>;
         return built;
     }();
     return &descriptor;
 }
 
-/**`descriptor->manifest()` 的实现：把插件自己那份静态宣言原样交出去（不拷贝）。*/
+/**
+ * `golding_plugin_entry` 的实现：把 C 参数包成 `Host`，再交给插件自己的 `Register`。
+ *
+ * `pluginName` 由宿主从 `plugin.json` 读出后传进来，只用于日志——dll 不再自称名字。
+ */
 template <typename T>
-const GoldingPluginManifest* ManifestThunk()
-{
-    return &SharedInstance<T>().Manifest();
-}
-
-/**`golding_plugin_entry` 的实现：把 C 参数包成 `Host`，再交给插件自己的 `Register`。*/
-template <typename T>
-int EntryThunk(const GoldingHostApi* api)
+int EntryThunk(const GoldingHostApi* api, const char* pluginName)
 {
     if (api == nullptr)
     {
         return 1;
     }
-    T& plugin = SharedInstance<T>();
-    const PluginManifest& manifest = plugin.Manifest();
-    Host host(api, manifest.name);
-
-    // 一行"我声明了什么"。能力目录（T-07）起来之前，这行就是唯一能看的能力面：
-    // 装配失败时先看它，能立刻分出"没声明"还是"声明了没注册"。
-    char summary[256] = {};
-    std::snprintf(summary, sizeof(summary), "%s 能力: kind=%s needs=%zu",
-                  manifest.name != nullptr ? manifest.name : "?",
-                  manifest.kind != nullptr ? manifest.kind : "", manifest.needCount);
-    host.Info(summary);
-
-    return plugin.Register(host) ? 0 : 1;
+    Host host(api, pluginName);
+    host.Info("entry");
+    return SharedInstance<T>().Register(host) ? 0 : 1;
 }
 
 /**descriptor 里那个 `ready` 的实现。返回值原样传出（宿主汇总成退出码的一部分）。*/
 template <typename T>
-int ReadyThunk(const GoldingHostApi* api)
+int ReadyThunk(const GoldingHostApi* api, const char* pluginName)
 {
     if (api == nullptr)
     {
         return 0;
     }
     T& plugin = SharedInstance<T>();
-    const PluginManifest& manifest = plugin.Manifest();
-    Host host(api, manifest.name);
+    Host host(api, pluginName);
     return plugin.Ready(host);
 }
 
@@ -502,8 +462,9 @@ int ReadyThunk(const GoldingHostApi* api)
 /**
  * @brief 导出插件：生成 `golding_plugin_descriptor` 与 `golding_plugin_entry` 两个 C 符号。
  *
- * 只导出这两个。`abiVersion` 取编译期常量（就是 ABI 该有的样子），其余字段全部来自
- * `T::Manifest()`。作者不写任何 `extern "C"`。
+ * 只导出这两个。`abiVersion` / `sdkId` / `sdkVersion` 全部取编译期常量（就是 ABI 该有的
+ * 样子），作者不写任何 `extern "C"`。ABI v11 起两者都多一个 `pluginName` 参数——名字在
+ * `plugin.json` 里，由宿主读出来传进来。
  *
  * @param TYPE 插件类（必须继承 `golding::Plugin`、有默认构造函数）。
  */
@@ -513,7 +474,8 @@ int ReadyThunk(const GoldingHostApi* api)
     {                                                                                                      \
         return ::golding::detail::BuildDescriptor<TYPE>();                                                  \
     }                                                                                                      \
-    extern "C" GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi)                \
+    extern "C" GOLDING_PLUGIN_EXPORT int golding_plugin_entry(const GoldingHostApi* hostApi,                \
+                                                              const char* pluginName)                      \
     {                                                                                                      \
-        return ::golding::detail::EntryThunk<TYPE>(hostApi);                                                \
+        return ::golding::detail::EntryThunk<TYPE>(hostApi, pluginName);                                    \
     }

@@ -100,6 +100,72 @@ bool ReadIntField(const json::Value& object, const char* key, int& out)
     return true;
 }
 
+/**
+ * 读一个能力表：`{ "golding.overlay": 1 }`。值是版本号，允许数字或数字字符串。
+ * 字段缺省时返回 true（两个字段都是可选的）。
+ */
+bool ReadCapabilityMap(const json::Value& root, const char* key, std::vector<ManifestCapability>& out,
+                       std::string& why)
+{
+    const json::Value* node = root.find(key);
+    if (node == nullptr)
+    {
+        return true;
+    }
+    if (node->type != json::Value::Type::object)
+    {
+        why = "必须是对象（能力名 → 版本）";
+        return false;
+    }
+
+    for (const auto& member : node->object)
+    {
+        if (member.first.empty())
+        {
+            why = "里有空能力名";
+            return false;
+        }
+
+        const json::Value& value = member.second;
+        double raw = 0.0;
+        if (value.type == json::Value::Type::number)
+        {
+            raw = value.number;
+        }
+        else if (value.type == json::Value::Type::string && !value.text.empty())
+        {
+            try
+            {
+                std::size_t consumed = 0;
+                raw = std::stod(value.text, &consumed);
+                if (consumed != value.text.size())
+                {
+                    why = "里 " + member.first + " 的版本不是整数";
+                    return false;
+                }
+            }
+            catch (...)
+            {
+                why = "里 " + member.first + " 的版本不是整数";
+                return false;
+            }
+        }
+        else
+        {
+            why = "里 " + member.first + " 的版本不是整数";
+            return false;
+        }
+
+        if (raw < 0.0 || raw > 2147483647.0 || static_cast<double>(static_cast<unsigned int>(raw)) != raw)
+        {
+            why = "里 " + member.first + " 的版本超出范围";
+            return false;
+        }
+        out.push_back(ManifestCapability{member.first, static_cast<unsigned int>(raw)});
+    }
+    return true;
+}
+
 } // namespace
 
 ManifestResult ManifestLoader::read(const std::filesystem::path& pluginDir)
@@ -135,7 +201,7 @@ ManifestResult ManifestLoader::read(const std::filesystem::path& pluginDir)
     // 这条与"abiVersion 只认 dll"同源：同一份事实写两处会烂，而**写了不生效**
     // 比写错更坏——它让人以为配置生效了。所以不收的键一律驳回并点名。
     static const char* const kKnownKeys[] = {"name", "title", "version", "apiVersion",
-                                             "role", "requires", "targets"};
+                                             "role", "requires", "provides", "needs", "targets"};
     for (const auto& entry : root.object)
     {
         bool known = false;
@@ -203,34 +269,48 @@ ManifestResult ManifestLoader::read(const std::filesystem::path& pluginDir)
         manifest.dependencies.push_back(item.text);
     }
 
-    // ---- 可选字段：targets.win64.lib（dll 插件）----
-    if (const json::Value* targets = root.find("targets"))
+    // ---- 可选字段：能力声明（provides / needs）----
+    //
+    // 放在 `plugin.json` 而不是 descriptor：**扫描阶段就要能建"能力 → 提供方 + 版本"
+    // 的表**，否则 `needs` 的最小版本在装配之前没有可比的对象（descriptor 要等
+    // dll 加载完才读得到）。扫描之后、entry 之前，拓扑和版本表都是齐的。
     {
-        if (targets->type != json::Value::Type::object)
+        std::string why;
+        if (!ReadCapabilityMap(root, "provides", manifest.provides, why))
         {
-            return reject("targets 不是对象");
+            return reject("provides " + why);
         }
-        if (const json::Value* win64 = targets->find("win64"))
+        if (!ReadCapabilityMap(root, "needs", manifest.needs, why))
         {
-            if (win64->type != json::Value::Type::object)
-            {
-                return reject("targets.win64 不是对象");
-            }
-            if (const json::Value* lib = win64->find("lib"))
-            {
-                if (lib->type != json::Value::Type::string)
-                {
-                    return reject("targets.win64.lib 不是字符串");
-                }
-                manifest.hasDll = !lib->text.empty();
-                manifest.dllPath = lib->text;
-            }
+            return reject("needs " + why);
         }
     }
 
+    // ---- 必需字段：targets.win64.lib ----
+    //
+    // 曾经把它当可选，留着"无 dll 的纯数据插件"这条路。那条路在 T-11 删掉
+    // `widgets{}` 之后就没有载体了：没有 dll 的插件进不了依赖图、不能声明能力、
+    // 也不会被调 entry，唯一效果是在档案表里多一行。所以现在**缺 dll 是配置错误**，
+    // 不是另一种插件形态（`docs/Options.md`）。
+    const json::Value* targets = root.find("targets");
+    if (targets == nullptr || targets->type != json::Value::Type::object)
+    {
+        return reject("缺 targets 对象（插件必须声明 targets.win64.lib）");
+    }
+    const json::Value* win64 = targets->find("win64");
+    if (win64 == nullptr || win64->type != json::Value::Type::object)
+    {
+        return reject("缺 targets.win64 对象（本宿主只支持 win64）");
+    }
+    const json::Value* lib = win64->find("lib");
+    if (lib == nullptr || lib->type != json::Value::Type::string || lib->text.empty())
+    {
+        return reject("缺 targets.win64.lib（或为空 / 不是字符串）");
+    }
+    manifest.dllPath = lib->text;
+
     // dll 路径当场解析：`HostApp` 之后按绝对路径直接 open，不再自己拼。
     // 绝对路径或 `..` 逃出去都判声明错误，不当"没配"。
-    if (manifest.hasDll)
     {
         const std::filesystem::path resolved = PathFinder::resolve(pluginDir, manifest.dllPath);
         if (resolved.empty())

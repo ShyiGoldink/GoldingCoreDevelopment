@@ -35,11 +35,20 @@ public:
 
     // ---- 声明面 ----
 
-    /**登记"某个插件声称提供某个能力"。同名重复声明只记第一条。*/
-    static void declare(const char* name, const char* declarer);
+    /**
+     * @brief 登记"某个插件声称提供某个能力，版本是 version"。
+     *
+     * 名字与版本都来自 `plugin.json` 的 `provides`（扫描阶段可读），所以这张表在
+     * **entry 之前**就是完整的——`needs` 的最小版本正是拿它来比。
+     * 同名重复声明只记第一条。
+     */
+    static void declare(const char* name, unsigned int version, const char* declarer);
 
     /**有人**声称**提供了这个能力吗（不保证真的注册了）。*/
     static bool isDeclared(const char* name);
+
+    /**声称提供的能力版本；没声明过返回 0（先用 `isDeclared` 区分）。*/
+    static unsigned int versionOf(const char* name);
 
     /**声称提供这个能力的是谁；没人声称返回 nullptr。*/
     static const char* declarerOf(const char* name);
@@ -68,8 +77,7 @@ public:
      * 校验开关（默认 true）。
      *
      * 关掉之后 `needs` 只留痕、不把插件标成 `Unresolved`——留一条不需要改代码的
-     * 退路：某个环境里能力确实缺席、而那个插件还能降级工作时用得上
-     * （`docs/TASK-CORE-UPING.md` T-07 的回退项）。
+     * 退路：某个环境里能力确实缺席、而那个插件还能降级工作时用得上。
      */
     static void setStrict(bool strict);
     static bool strict();

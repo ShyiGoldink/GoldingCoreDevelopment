@@ -28,14 +28,21 @@ extern "C" {
  * 末尾的 `ready`（骨架建完再回调，自检插件靠它拿界面做断言），以及 HostApi 的
  * `uiRoot`（装配后的界面根）与 `bootMode`（宿主启动模式串）。
  *
- * v9（2026-10-23，`TASK-CORE-UPING.md` T-06）：`GoldingPluginDescriptor` 末尾追加
- * 三样东西——`manifest()`（静态能力宣言）、`sdkId`（这套头文件集合的标识）、
- * `sdkVersion`。**不向后兼容**：v8 插件全部被拒，必须同一次重编（`Options.md` §4）。
+ * v9（2026-10-23）：`GoldingPluginDescriptor` 末尾追加三样东西——`manifest()`
+ * （静态能力宣言）、`sdkId`（这套头文件集合的标识）、`sdkVersion`。**不向后兼容**。
  *
- * v10（2026-10-23，`TASK-CORE-PLUGINS.md` T-12）：`GoldingHostApi` 末尾追加
- * `pluginDir`——按插件名查它被扫描到的那个目录。**不向后兼容**，同样必须整批重编。
+ * v10（2026-10-23）：`GoldingHostApi` 末尾追加 `pluginDir`——按插件名查它被扫描到的
+ * 那个目录。**不向后兼容**，同样必须整批重编。
+ *
+ * v11（2026-10-24）：按"**json 描述 / dll 内容**"重新划分。
+ * `GoldingPluginDescriptor` 从九项砍到四项，删除 `name` / `version` /
+ * `rootWidgetClass` / `depends` / `dependCount` / `manifest()`——它们全是**数据**，
+ * 全部移到 `plugin.json`（扫描阶段就可读，宿主不必等 dll 就能建拓扑）。
+ * 两个导出函数都多收一个 `pluginName` 参数，因为 dll 不再自称名字。
+ * **不向后兼容**，插件必须整批重编；`GoldingPluginManifest` 与
+ * `GoldingCapabilityNeed` 两个类型随之删除。
  */
-#define GOLDING_PLUGIN_ABI_VERSION 10u
+#define GOLDING_PLUGIN_ABI_VERSION 11u
 
 /**
  * 这套 SDK 的标识与版本。descriptor 的 `sdkId` / `sdkVersion` 由它们填。
@@ -140,8 +147,12 @@ typedef struct GoldingPluginInfo
     int abiVersion;
     /**
      * 0 = 可用；1 = manifest 不合法；2 = 打不开 dll；3 = ABI 不匹配；
-     * 4 = 没有 dll；5 = entry 失败；6 = 依赖不满足（缺失或成环）；
+     * 5 = entry 失败；6 = 依赖不满足（缺失或成环）；
      * 7 = apiVersion 高于宿主支持；8 = `sdkId` 与宿主不一致（不是给这套 SDK 编的）。
+     *
+     * **4 已废弃**（2026-10-24）：曾表示"没有 dll 的纯数据插件"，该形态已取消，
+     * 缺 `targets.win64.lib` 现在判 1（manifest 不合法）。编号不重排——
+     * 这些整数是跨 dll 契约，重排会让历史日志错位。
      *
      * 这张表在宿主侧的唯一定义处是 `Application/PluginState.h` 的 `PluginState`；
      * 跨 dll 只能传 int，所以这里保留注释而不引入枚举。
@@ -302,7 +313,7 @@ typedef struct GoldingHostApi
      * @brief 某个插件被扫描到的那个**目录**（绝对路径，UTF-8）；未知名字返回 nullptr。
      *
      * 为什么是"按名字查"而不是"我自己的目录"：`hostContext` 目前只是一个字符串
-     * 指针（见 `Options.md` §5），没有承载目录的位置；而插件名本来就是档案表的
+     * 指针（见 `docs/Options.md`），没有承载目录的位置；而插件名本来就是档案表的
      * 唯一键，`Host::PluginDir()` 会把自己的名字填进第一个参数。
      *
      * 用途只有一个：**读自己带的数据文件**（配置、图标、清单）。相对路径的解析
@@ -314,101 +325,56 @@ typedef struct GoldingHostApi
 } GoldingHostApi;
 
 /**
- * @brief 一条能力需求：要哪个名字、至少哪个版本（ABI v9）。
+ * @brief 插件的自我描述**已全部移到 `plugin.json`**（ABI v11）。
  *
- * 只有名字与最小版本，**不带 vtable**：静态声明要在装配前就能比对，
- * 而 vtable 是运行时事实。
+ * 这里原来的 `GoldingCapabilityNeed`（一条能力需求）与 `GoldingPluginManifest`
+ * （身份 + 依赖 + provides + needs）两个类型已删除。它们承载的全是数据，
+ * 而数据现在只有一个地方写：`plugin.json`。
+ *
+ * 能力需求在 json 里是 `"needs": { "能力名": 最小版本 }`，能力提供是
+ * `"provides": { "能力名": 版本 }`，依赖是 `"requires": { "plugins": [...] }`。
+ * 写错会判 `Invalid` 并点名，不会静默失效。
  */
-typedef struct GoldingCapabilityNeed
-{
-    const char* name;
-    unsigned int minVersion;
-} GoldingCapabilityNeed;
 
 /**
- * @brief 插件的静态宣言（ABI v9）：身份 + 依赖 + 我提供什么 + 我需要什么。
+ * @brief 插件的**二进制身份**与装配后钩子。数据不在这里。
  *
- * 字段与 `GoldingPlugin.h` 的 `golding::PluginManifest` **一一对应**，后者直接
- * 用这个 C 结构当存储（跨 dll 只传 C POD，C++ 那层只是别名 + 便利写法）。
+ * ABI v11 的划分：`plugin.json` 管**描述**（名字、版本、类型、依赖、能力、dll 路径），
+ * dll 管**内容**（这份二进制给哪套 SDK 编的、装配完要做什么）。所以这张表只剩四项。
  *
- * `kind` 是自由字符串（`"panel"` / `"page"` / `"logic"` / `"widgets"` …），
- * **core 不解释它**，只存、只展示。
+ * 为什么名字和版本也移走了：它们是描述，而且在三处各写一遍（json / C++ 源码 /
+ * descriptor）时必然对不上。现在唯一的权威是 `plugin.json`，宿主把名字**传进来**
+ * 给 `entry` 与 `ready`，dll 不再自称。
  */
-typedef struct GoldingPluginManifest
-{
-    const char* name;
-    const char* version;
-    /**宿主装配界面时创建哪个组件类；空/null 表示不提供界面。*/
-    const char* rootWidgetClass;
-    const char* kind;
-
-    const char* const* depends;
-    size_t dependCount;
-
-    /**我提供的能力**名字**（运行时 vtable 由宿主交叉校验）。*/
-    const char* const* provides;
-    size_t provideCount;
-
-    const GoldingCapabilityNeed* needs;
-    size_t needCount;
-} GoldingPluginManifest;
-
-/**插件的自我描述。宿主在任何其他调用之前先读它。*/
 typedef struct GoldingPluginDescriptor
 {
+    /**二进制布局版本。**必须第一个查**——不对时后面那些指针本身就不可信。*/
     unsigned int abiVersion;
-    const char* name;
-    const char* version;
-    /**宿主装配界面时创建哪一个组件类；空串表示本插件不提供界面。*/
-    const char* rootWidgetClass;
-
-    /**
-     * 依赖的插件名。**由 SDK 的 `PluginManifest::depends` 在编译期填好**（见
-     * `GoldingPlugin.h` 的 `GOLDING_EXPORT_PLUGIN`），不再写在 plugin.json 里——
-     * 依赖是编译期事实，两处写必然对不上。
-     */
-    const char* const* depends;
-    size_t dependCount;
-
-    /**
-     * @brief **装配之后**再回调一次（ABI v8，可空）。返回失败项数，0 = 全绿。
-     *
-     * 时序：扫描 → 加载 → entry（注册）→ 建窗 → 装配骨架（调面板的 create）→
-     * **依次调每个插件的 ready**。所以这里 `uiRoot` 已经能查、页面已经挂上。
-     *
-     * 它存在就是为了自检：断言"根铺满了吗""每页都装得上吗"这类话必须发生在
-     * 装配**之后**，而 `entry` 太早（那时连窗口都没有）。
-     *
-     * 约定：**返回值只报数，不崩**。失败项由宿主汇总成进程退出码的一部分，
-     * 所以一个插件的断言红了不应该影响别的插件跑。
-     */
-    int (*ready)(const GoldingHostApi* hostApi);
-
-    // ---- ABI v9：能力宣言与 SDK 身份 ----
-
-    /**
-     * @brief 静态能力宣言（可空）。指向的存储**由插件持有、活到进程结束**，宿主不拷贝。
-     *
-     * 装配**之前**就能读到，所以宿主能在 entry 之前判"它要的能力没人提供"。
-     * 与运行时 `registerService` 的一致性由宿主交叉校验（声明了没注册 = 该插件坏）。
-     */
-    const GoldingPluginManifest* (*manifest)(void);
 
     /**
      * 这套头文件集合的标识（`"golding"`）。**严格相等**，不等即拒。
      *
      * 与 `abiVersion` 分工：那个管二进制布局，这个管"给哪套 SDK 编的"。
-     * 平台不塞进来——跨平台由 `plugin.json` 的 `targets` 表达（编译目标是编译目标，
-     * SDK 是头文件集合，混成一个字符串以后就没法分别校验）。
      */
     const char* sdkId;
 
     /**
      * 这套 SDK 的版本（`"0.2.0"`）。实验期**只记不拒**：
      * 编译栈要等正式版发布前才选定，在那之前它无法代表"头文件 + 编译器 ABI"这个组合
-     * （解除条件见 `docs/Options.md` §1）。
+     * （解除条件见 `docs/Options.md`）。
      */
     const char* sdkVersion;
+
+    /**
+     * @brief **装配之后**再回调一次（可空）。返回失败项数，0 = 全绿。
+     *
+     * 时序：扫描 → 加载 → entry（注册）→ 建窗 → 装配骨架 → **依次调每个插件的 ready**。
+     * 所以这里 `uiRoot` 已经能查、页面已经挂上。`entry` 太早（那时连窗口都没有）。
+     *
+     * `pluginName` 由宿主从 `plugin.json` 读出后传进来，只用于日志。
+     * 约定：**返回值只报数，不崩**——一个插件的断言红了不该影响别的插件跑。
+     */
+    int (*ready)(const GoldingHostApi* hostApi, const char* pluginName);
 } GoldingPluginDescriptor;
 
 /**
@@ -462,7 +428,8 @@ typedef struct GoldingWidgetsService
 } GoldingWidgetsService;
 
 typedef const GoldingPluginDescriptor* (*GoldingPluginDescriptorFn)(void);
-typedef int (*GoldingPluginEntryFn)(const GoldingHostApi* hostApi);
+/**`pluginName` 由宿主从 `plugin.json` 读出后传进来；dll 不再自称名字（ABI v11）。*/
+typedef int (*GoldingPluginEntryFn)(const GoldingHostApi* hostApi, const char* pluginName);
 
 /**
  * 插件必须导出这两个函数。
