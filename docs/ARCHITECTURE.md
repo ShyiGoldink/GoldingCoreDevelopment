@@ -42,8 +42,13 @@
 
 1. **core 不 include InkingUIKit。** 于是 `GOLDING_WITH_INKING=OFF` 也能编、也能跑单测，
    "core 可无头自检"不依赖预编译包是否装得上。
-2. **插件不链接 core。** 插件只拿 `include/sdk/` 两个头（可选再加 InkingUIKit），
-   与宿主之间只有 C ABI。core 的 C++ 类是宿主的实现细节。
+2. **插件不链接 core。** 插件只拿 `include/sdk/` 的头（两个契约头 + 可选的
+   `golding_json.h`，需要界面再加 InkingUIKit），与宿主之间只有 C ABI。
+   core 的 C++ 类是宿主的实现细节。
+   `include/` 的其余部分（`Application/`、`HostApp.h`、`Tool/`）**插件看得见但链不到**——
+   构建是把整棵 `include/` 暴露出去的，符号却编在 `golding_core` 里。误引的表现是
+   "编译过、链接期 `undefined reference`"，所以这些头带编译期守卫
+   `GOLDING_CORE_INTERNAL`（未定义就 `#error`，见 `include/Application/CoreInternal.h`）。
 3. **宿主是唯一同时认识两边的地方。** 而且只有 `host/main.cpp` 一个文件——
    宿主不认识任何插件名、节点名、区域名、页面 id。
 
@@ -56,8 +61,8 @@
 
 | 路径 | 内容 | 改这里会波及 |
 | --- | --- | --- |
-| `include/sdk/` | 插件的全部公开面：`golding_plugin.h`（C ABI）、`GoldingPlugin.h`（C++ 基类 + `Host`） | 所有插件（ABI 事件） |
-| `include/Application/` | core 的类：`HostApp` / 五张表 / 扫描 / 加载 / 解析 / JSON | 宿主、单测 |
+| `include/sdk/` | 插件的全部公开面：`golding_plugin.h`（C ABI）、`GoldingPlugin.h`（C++ 基类 + `Host`）、`GoldingWidgets.h`、`golding_json.h`（header-only，可选） | 所有插件（ABI 事件） |
+| `include/Application/` | core 的类：`HostApp` / 五张表 / 扫描 / 加载 / 解析 | 宿主、单测（**带 `GOLDING_CORE_INTERNAL` 守卫**，插件引了在编译期就炸） |
 | `include/DataStruct/` | 纯数据：`Manifest`、`PluginSource` | 扫描与加载 |
 | `include/Tool/` | `PathFinder`（路径定位与 UTF-8 转换） | 全项目 |
 | `include/HostApp.h` | 启动编排类的公开面 | 宿主 |

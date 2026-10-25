@@ -139,9 +139,16 @@ scan → 建节点（读 json 的 requires）→ resolve → 加载 dll → entr
 
 ---
 
-## 12. JSON 解析器自写，不对外
+## 12. JSON 解析器自写，但**只是实现自写**——它在 SDK 头里
 
-`src/Application/Json.cpp`，只在 `golding::detail::json` 里用。
+`include/sdk/golding_json.h`，header-only、全 `inline`，命名空间 `golding::json`。
+（这一条在 0.2.1 改过：原先是 `src/Application/Json.cpp` + `golding::detail::json`，
+编在 `golding_core` 里，插件拿得到头、拿不到符号，于是每个插件各写一份——见
+`docs/TASK-SDK-JSON.md`。）
 
-**原因**：core 只读两种文件（`plugin.json` 与插件自己的数据），需求固定。出现第二个需要
-JSON 的模块时再整体替换，公共头不受影响。
+**还是自写，不引第三方**：需求固定（`plugin.json` 与插件自己的配置），且第三方
+（nlohmann/json）默认抛异常，而异常不得穿 dll 边界；它的 `Value` 语义（保序、重复键全留）
+也与本仓不同，引进来就是两份方言。
+
+**收口代价**：每个用到它的 dll 各编一份 inline 副本（约 600 ms/TU），换来的
+"仓库里只有一种 JSON 读法"。

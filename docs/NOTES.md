@@ -48,6 +48,18 @@
 
 ## 坑
 
+**头可见 ≠ 符号可用：误引 core 内部头要到链接期才炸。** 构建把整棵 `include/`
+暴露给插件（`golding_sdk` 是 INTERFACE + `include/`），但 `Application/*.h` /
+`HostApp.h` / `Tool/PathFinder.h` 的实现编在 `golding_core`，而插件只链 `golding_sdk`。
+于是插件 `#include` 它们**编译全过**，报错发生在链接期、且是干巴巴的
+`undefined reference`——离错误现场十万八千里。这份代价已经付过一次：spellbook 因为
+它自带了一份 340 行手写 JSON 解析器（"插件不链 core"那句注释就写在上面），同一份
+JSON 在仓库里因此有三种读法。
+现在的处理：那些内部头首行 `#include "Application/CoreInternal.h"`，未定义
+`GOLDING_CORE_INTERNAL` 时直接 `#error`（宏只给 `golding_core` / `golding_host` /
+`core_tests`，**`sdk_host_tests` 不给**——它是"外部使用者"的样本）。
+真正需要的能力（如 JSON）提成 `include/sdk/` 下的 header-only 头，不要引内部头。
+
 **`Open()` 之后不要再调 `Show()`。** `Show()` 的语义就是 `Open()` + `while (PumpOnce())`
 （库头文件的注释原话）。窗口已经打开时它会按"切场景"把打开流程重走一遍，
 **真实驱动下直接段错误**（dummy 驱动下看不出来，因为这个组合只在真窗口上炸）。

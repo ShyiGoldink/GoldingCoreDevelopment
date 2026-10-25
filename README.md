@@ -112,6 +112,8 @@ GOLDING_EXPORT_PLUGIN(HelloPlugin)
 - `GOLDING_EXPORT_PLUGIN` 生成 `golding_plugin_descriptor` 与 `golding_plugin_entry`
   两个 C 符号，不要手写 `extern "C"`。
 - 注册一律走 `host.AddXxx()`，不要自己拼 C 调用——`Host` 每次都留一行日志。
+- **要读 JSON 就 `#include <sdk/golding_json.h>`**（`golding::json::parse` / `dump`），
+  不要自己写解析器，也不要引 core 的内部头——那些头有编译期守卫，引了在编译期就 `#error`。
 
 ### plugin.json
 

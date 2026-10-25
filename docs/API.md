@@ -11,6 +11,26 @@
 
 ---
 
+## 0. 插件能用的头（三个）
+
+插件只链 `golding_sdk`（一个 INTERFACE 目标），能用的头就这三个。**要用别的
+能力就把它提成 SDK 头，不要直接引 core 的内部头**——那些头有编译期守卫
+（`GOLDING_CORE_INTERNAL`），引了在编译期就 `#error`。
+
+| 头 | 必须？ | 给你什么 | 明确的边界 |
+| --- | --- | --- | --- |
+| `sdk/golding_plugin.h` | 必须（C ABI） | `GoldingPluginDescriptor` / `GoldingHostApi` 两个导出符号与它们的结构体 | 只有二进制身份与函数表；**所有数据在 `plugin.json`** |
+| `sdk/GoldingPlugin.h` | 必须（C++ 面） | `golding::Plugin` / `golding::Host`、注册与取服务的糖 | 零 UI 依赖，不链 InkingUIKit 也能编 |
+| `sdk/GoldingWidgets.h` | 要画界面时 | 控件声明与句柄类型 | 只声明，实现在 InkingUIKit |
+| `sdk/golding_json.h` | 可选 | `golding::json::parse` / `dump` / `Value::find` | 严格 JSON：不支持注释、尾逗号、`NaN` / `Infinity`；嵌套 > 64 层拒收；**不抛异常**，失败返回 false |
+
+`golding_json.h` 是 header-only、全 `inline`，**不新增导出符号**：core 用它读
+`plugin.json`，插件用它读自己的 `shape.json` / `apps.json`——同一份实现两边各编一次，
+换来"仓库里只有一种 JSON 读法"。写侧 `dump` 只转 `"`、`\` 与 `<0x20` 的控制字符，
+非 ASCII **原样输出 UTF-8 不转转义**；没有 pretty、没有构造器 DSL。
+
+---
+
 ## 1. C ABI（`include/sdk/golding_plugin.h`）
 
 ### 1.1 两个导出符号
