@@ -14,6 +14,7 @@
 // 而"测试自己崩了"最容易被人当成"测试通过了"。
 
 #include <sdk/GoldingPlugin.h>
+#include <sdk/golding_json.h>
 
 #include <cstdio>
 #include <cstring>
@@ -246,7 +247,80 @@ int main()
     check("版本不足仍放行", tooNew == &service);
     check("版本不足留的痕可区分", std::strstr(stub.lastLog, "版本不足") != nullptr, stub.lastLog);
 
-    // ---- 6. 空 api 不崩（宿主缺席时的降级路径）----
+    // ---- 6. JSON 解析器（sdk/golding_json.h）----
+    //
+    // 这一组也同时在回答"开发包能不能单独用"：本目标只链 `golding_sdk`，
+    // 解析器是 header-only 的，不链 core 也能解析——这正是旧 `Application/Json.h`
+    // 做不到的事（头可见、符号在 golding_core 里 ⇒ 链接期才炸）。
+    {
+        namespace json = golding::json;
+
+        // object：取键、各标量类型、未命中
+        json::Value root;
+        const bool okObject = json::parse(R"({"name":"a","n":2.5,"t":true,"f":false,"z":null})", root);
+        check("json.parse object", okObject && root.type == json::Value::Type::object);
+        const json::Value* name = root.find("name");
+        const json::Value* num = root.find("n");
+        const json::Value* yes = root.find("t");
+        const json::Value* no = root.find("f");
+        const json::Value* nil = root.find("z");
+        check("json.object 取字符串", name != nullptr && name->text == "a");
+        check("json.object 取数字", num != nullptr && num->type == json::Value::Type::number && num->number == 2.5);
+        check("json.object 取 true", yes != nullptr && yes->type == json::Value::Type::boolean && yes->boolean);
+        check("json.object 取 false", no != nullptr && no->type == json::Value::Type::boolean && !no->boolean);
+        check("json.object 取 null", nil != nullptr && nil->type == json::Value::Type::null);
+        check("json.find 未命中返回 nullptr", root.find("nope") == nullptr);
+        check("json.find 非 object 返回 nullptr", name != nullptr && name->find("any") == nullptr);
+
+        // array
+        json::Value list;
+        const bool okArray = json::parse("[1, \"two\", [3]]", list);
+        check("json.parse array", okArray && list.type == json::Value::Type::array && list.array.size() == 3);
+        check("json.array 元素", okArray && list.array[0].number == 1.0 && list.array[1].text == "two" &&
+                                    list.array[2].type == json::Value::Type::array);
+
+        // string 转义
+        json::Value escaped;
+        const bool okEscaped = json::parse(R"("a\"b\\c\nd\te")", escaped);
+        check("json.parse string 转义",
+              okEscaped && escaped.text == "a\"b\\c\nd\te", escaped.text);
+
+        // \uXXXX 与代理对（BMP 一个用例、平面外一个用例）
+        json::Value bmp;
+        const bool okBmp = json::parse(R"({"k":"中文"})", bmp);
+        const json::Value* bmpText = bmp.find("k");
+        check("json.parse \\uXXXX", okBmp && bmpText != nullptr && bmpText->text == "\xe4\xb8\xad\xe6\x96\x87",
+              bmpText != nullptr ? bmpText->text : "");
+
+        json::Value emoji;
+        const bool okEmoji = json::parse(R"("\uD83D\uDE00")", emoji);
+        check("json.parse 代理对", okEmoji && emoji.text == "\xF0\x9F\x98\x80", emoji.text);
+
+        json::Value loneSurrogate;
+        check("json.parse 孤立高代理 → false", !json::parse(R"("\uD83D")", loneSurrogate));
+
+        // 深度超限：kMaxDepth=64，压 200 层必须被挡住（挡不住就是栈打穿）
+        std::string deep;
+        for (int i = 0; i < 200; ++i)
+        {
+            deep.push_back('[');
+        }
+        for (int i = 0; i < 200; ++i)
+        {
+            deep.push_back(']');
+        }
+        json::Value deepOut;
+        check("json.parse 深度超限 → false", !json::parse(deep, deepOut));
+
+        // 严格 JSON：注释 / 尾逗号 / 单引号 / NaN 一律拒
+        json::Value junk;
+        check("json.parse 尾逗号 → false", !json::parse(R"({"a":1,})", junk));
+        check("json.parse 裸键 → false", !json::parse(R"({a:1})", junk));
+        check("json.parse 空文本 → false", !json::parse("", junk));
+        check("json.parse 后跟垃圾 → false", !json::parse("{} {}", junk));
+    }
+
+    // ---- 7. 空 api 不崩（宿主缺席时的降级路径）----
     static const GoldingPageDecl kUnusedPage{"unused", "没宿主", 0, nullptr};
     golding::Host noApi(nullptr, nullptr);
     check("空 api 注册返回 false", !noApi.AddPage(kUnusedPage));

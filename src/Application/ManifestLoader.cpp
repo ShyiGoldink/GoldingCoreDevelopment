@@ -5,7 +5,7 @@
 #include <utility>
 
 #include "Application/ManifestLoader.h"
-#include "Application/Json.h"
+#include <sdk/golding_json.h>
 #include "Tool/PathFinder.h"
 
 namespace golding
@@ -14,7 +14,7 @@ namespace golding
 namespace
 {
 
-namespace json = detail::json;
+namespace json = golding::json;
 
 bool ReadFile(const std::filesystem::path& path, std::string& out)
 {

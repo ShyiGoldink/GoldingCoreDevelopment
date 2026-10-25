@@ -1,37 +1,83 @@
-#include "Application/Json.h"
+#pragma once
+
+// 极简 JSON 读取器：服务于 plugin.json 与插件自己的配置（shape.json / apps.json…）。
+//
+// 它原先是 core 内部的 `Application/Json.h` + `src/Application/Json.cpp`（437 行），
+// 被编进 `golding_core`；而插件只链 `golding_sdk` ⇒ 头可见、符号不在 ⇒ 插件只能
+// 自带一份手写解析（T-01 之前同一份 JSON 在仓库里有三种读法）。搬到这里之后：
+//   - 全 `inline`、零导出符号：插件 `#include <sdk/golding_json.h>` 即可，不新增 dll 依赖；
+//   - 命名空间从 `golding::detail::json` 改成 `golding::json`：进了 SDK 就是公开面，
+//     `detail` 反而误导（读者会以为"随时可改"）。
+//
+// API 刻意保持**极窄**（读：`parse` + `Value::find`；写：`dump`），以后换实现时
+// 只改这一层，调用方一个字都不用动。
+//
+// 支持：object / array / string（含 \uXXXX 与代理对）/ number / true / false / null。
+// 不支持：注释、尾逗号、NaN / Infinity、深度超过 kMaxDepth 的嵌套。
+// **不抛异常**（本仓铁律：异常不得穿 dll 边界）：失败一律返回 false。
 
 #include <cctype>
 #include <cstdlib>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace golding
-{
-namespace detail
 {
 namespace json
 {
 
-const Value* Value::find(const std::string& key) const
+struct Value
 {
-    if (type != Type::object)
+    enum class Type
     {
+        null,
+        boolean,
+        number,
+        string,
+        array,
+        object,
+    };
+
+    Type type = Type::null;
+    bool boolean = false;
+    double number = 0.0;
+    std::string text;
+    std::vector<Value> array;
+    /**保持声明顺序；同名键保留全部，取首个。*/
+    std::vector<std::pair<std::string, Value>> object;
+
+    /**在 object 里按键查找；不是 object 或没这个键都返回 nullptr。*/
+    const Value* find(const std::string& key) const
+    {
+        if (type != Type::object)
+        {
+            return nullptr;
+        }
+        for (const auto& entry : object)
+        {
+            if (entry.first == key)
+            {
+                return &entry.second;
+            }
+        }
         return nullptr;
     }
-    for (const auto& entry : object)
-    {
-        if (entry.first == key)
-        {
-            return &entry.second;
-        }
-    }
-    return nullptr;
-}
+};
 
-namespace
+namespace detail
 {
 
 /**嵌套上限：挡住恶意或损坏文件把栈打穿。*/
-constexpr int kMaxDepth = 64;
+inline constexpr int kMaxDepth = 64;
 
+/**
+ * 手写递归下降解析器。
+ *
+ * 放在**具名** `detail` 命名空间（而不是匿名）：匿名命名空间会让每个 TU 各生成一份
+ * 互不相同的类型，头文件里的类定义本来是允许跨 TU 重复的，换成匿名反而招来
+ * "同一实体两个身份"的麻烦。
+ */
 class Parser
 {
 public:
@@ -268,7 +314,7 @@ private:
                 {
                     return false;
                 }
-                if (code >= 0xD800 && code <= 0xDBFF)
+                if (code >= 0xD800u && code <= 0xDBFFu)
                 {
                     // 高代理：必须跟一个低代理
                     if (pos_ + 1 >= text_.size() || text_[pos_] != '\\' || text_[pos_ + 1] != 'u')
@@ -277,13 +323,13 @@ private:
                     }
                     pos_ += 2;
                     unsigned low = 0;
-                    if (!ParseHex4(low) || low < 0xDC00 || low > 0xDFFF)
+                    if (!ParseHex4(low) || low < 0xDC00u || low > 0xDFFFu)
                     {
                         return false;
                     }
                     code = 0x10000u + ((code - 0xD800u) << 10) + (low - 0xDC00u);
                 }
-                else if (code >= 0xDC00 && code <= 0xDFFF)
+                else if (code >= 0xDC00u && code <= 0xDFFFu)
                 {
                     return false; // 孤立的低代理
                 }
@@ -424,14 +470,14 @@ private:
     std::size_t pos_ = 0;
 };
 
-} // namespace
+} // namespace detail
 
-bool parse(const std::string& text, Value& out)
+/**解析整段文本；失败返回 false，out 内容不可信。*/
+inline bool parse(const std::string& text, Value& out)
 {
-    Parser parser(text);
+    detail::Parser parser(text);
     return parser.ParseDocument(out);
 }
 
 } // namespace json
-} // namespace detail
 } // namespace golding

@@ -30,7 +30,6 @@ target_compile_definitions(golding_sdk INTERFACE
 # 宿主核心库：纯 C++，不依赖 InkingUIKit，可无头自检
 add_library(golding_core STATIC
     src/Tool/PathFinder.cpp
-    src/Application/Json.cpp
     src/Application/ManifestLoader.cpp
     src/Application/HostApp.cpp
     src/Application/PanelRootRegistry.cpp
