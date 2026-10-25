@@ -46,6 +46,17 @@ add_library(golding_core STATIC
 
 target_link_libraries(golding_core PUBLIC golding_sdk)
 
+# `GOLDING_CORE_INTERNAL`：core 内部头（`Application/*.h`、`HostApp.h`、`Tool/PathFinder.h`）
+# 的守卫宏。这些头的实现编在 `golding_core` 里，而插件只链 `golding_sdk`——插件误引
+# 的表现是"编译过、链接期 undefined reference"，离现场太远。守卫把它们变成**编译期**
+# `#error`（见 `include/Application/CoreInternal.h`）。
+#
+# 只给这三个目标定义：`golding_core`（实现方）、`golding_host`（宿主 exe，它读
+# 注册表接口）、`core_tests`（core 的单测）。
+# **`sdk_host_tests` 不定义**——它只链 SDK，正是"外部使用者"的样本，给了宏
+# 守卫就等于没测。
+target_compile_definitions(golding_core PRIVATE GOLDING_CORE_INTERNAL)
+
 if (MSVC)
     target_compile_options(golding_core PRIVATE /W4)
 else()
@@ -73,6 +84,8 @@ add_test(NAME sdk_host COMMAND sdk_host_tests)
 # 自检"不再依赖 InkingUIKit 是否装得上。
 add_executable(core_tests tests/core_tests.cpp)
 target_link_libraries(core_tests PRIVATE golding_core)
+# 与 core 同一条理由：core_tests 直接读 `Application/*.h`，它必须拿到守卫宏。
+target_compile_definitions(core_tests PRIVATE GOLDING_CORE_INTERNAL)
 if (MSVC)
     target_compile_options(core_tests PRIVATE /W4)
 else()

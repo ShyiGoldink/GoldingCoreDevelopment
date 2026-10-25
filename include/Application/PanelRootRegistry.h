@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Application/CoreInternal.h"
+
 #include <string>
 
 #include "Application/RegistryStats.h"

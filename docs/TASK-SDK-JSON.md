@@ -105,45 +105,13 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 
 ### T-02 给 core 内部头加编译期守卫
 
-- **状态**：未开始
-- **落点**：新增 `include/Application/CoreInternal.h`；`include/Application/*.h`（8 个）、
-  `include/HostApp.h`、`include/Tool/PathFinder.h` 首行；`CMakeLists.txt` 三个目标的宏定义
-
-**准备怎么改**
-
-把"头可见、符号不在"这个**链接期**陷阱改成**编译期**错误。候选表：
-
-| 方案 | 做法 | 代价 | 结论 |
-| - | - | - | - |
-| A 守卫头 | 内部头首行 `#include "Application/CoreInternal.h"`，该头在未定义 `GOLDING_CORE_INTERNAL` 时 `#error` | 每个内部头 +1 行；3 个 target +1 行定义 | **推荐** |
-| B 内部头搬去 `src/` | 改 include 布局，`host/` 与 `tests/` 路径全改 | 触碰面大、diff 噪声大、与本次目标无关 | 不做（本轮） |
-| C 只写进 NOTES | 零改动 | 陷阱还在，下一个人照样抄一份解析器 | 不做 |
-
-**大致改动逻辑**
-
-1. 新建 `include/Application/CoreInternal.h`：`#pragma once` + `#if !defined(GOLDING_CORE_INTERNAL) #error "core 内部头不对外开放：插件请用 <sdk/…>，缺能力就提成 SDK 头" #endif`。
-2. `CMakeLists.txt`：给 `golding_core`、`golding_host`、`core_tests` 加
-   `target_compile_definitions(... PRIVATE GOLDING_CORE_INTERNAL)`。**`sdk_host_tests` 不能加**
-   ——它正是"外部使用者"的样本，加了就等于把守卫测没了。
-3. 每个内部头首行加那句 include（宏未定义时它们自己先炸，位置就在编译期）。
-   **顺序不能反**：先加宏定义、再给头加守卫；反过来的中间态是"core 自己编不过"，
-   会把真失败和配置失败混在一起。
-
-**与改动前对比**
-
-| 场景 | 改动前 | 改动后 |
-| - | - | - |
-| 插件误引 `Application/Json.h` | 编译过，**链接期** `undefined reference`（spellbook 就是因此自带 340 行） | 编译期 `#error` + 一句"插件请用 `<sdk/…>`" |
-| core / 宿主 exe / `core_tests` | 正常 | 正常（多一个私有宏） |
-| `sdk_host_tests` | 只链 sdk、不定义任何 core 宏 | **不变**，且它继续充当"外部使用者"样本 |
-| 现有 7 个插件源码 | 无越界引用（§2 条目 5） | **不变**，一行都不用改 |
-
-**验收**：临时探针——在 `AppManagerPlugin.cpp` 顶部加 `#include "Application/Json.h"`，
-`ninja` 必须报出那句 `#error` 文案；删掉探针后 `build` 8 项 + `build-dev` 2 项全绿。
-另加一条静态检查（写进 §6 门槛）：`grep -L "CoreInternal.h" include/Application/*.h include/HostApp.h` 为空。
-
-**风险与回退**：风险 = 以后新增内部头忘记加守卫（守卫就漏一个）。
-回退 = 删守卫头与三处宏定义，一行 `git revert`；即便守卫缺失也只是回到今天的现状，不会更糟。
+- T-02 给 core 内部头加编译期守卫 — 已完成（2026-10-25：新增
+  `include/Application/CoreInternal.h`，未定义 `GOLDING_CORE_INTERNAL` 时 `#error`；16 个内部头
+  （14 个 `Application/*.h` + `HostApp.h` + `Tool/PathFinder.h`）首行已加守卫；宏只给
+  `golding_core` / `golding_host` / `core_tests`，`sdk_host_tests` 不给（它是外部使用者样本）。
+  探针：`AppManagerPlugin.cpp` 顶部加 `#include "Application/ManifestLoader.h"` → 编译期报出
+  那句 `#error`，探针已撤；`grep -L "CoreInternal.h" include/Application/*.h include/HostApp.h`
+  为空；build-dev 2 项与 build 8 项仍全绿）
 
 ---
 
@@ -376,7 +344,7 @@ spellbook 现在**一条断言都没有**（`Ready` 直接 `return 0`），所�
 | 编号 | 任务 | 批次 | 状态 |
 | - | - | - | - |
 | T-01 | 把读取器搬成 `include/sdk/golding_json.h` | 0.2.1-a | 已完成 |
-| T-02 | 给 core 内部头加编译期守卫 | 0.2.1-a | 未开始 |
+| T-02 | 给 core 内部头加编译期守卫 | 0.2.1-a | 已完成 |
 | T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 未开始 |
 | T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 未开始 |
 | T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 未开始 |

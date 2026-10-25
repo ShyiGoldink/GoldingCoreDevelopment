@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Application/CoreInternal.h"
+
 #include <filesystem>
 
 #include "sdk/golding_plugin.h"
