@@ -156,43 +156,15 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 
 ### T-05b spellbook 换用 SDK 解析器
 
-- **状态**：未开始
-- **落点**：`plugins/core/spellbook/src/SpellbookPlugin.cpp:238-583`（注释 + 340 行自写解析器）；
-  `:683-810` 的调用点
-
-**准备怎么改**
-
-删掉整块 `namespace json`（340 行）与那句"独立于 core 的解析器，插件不链 core"的注释，
-改用 `#include <sdk/golding_json.h>`。**保留 4 个取值助手**（`Text` / `Float` / `Number` /
-`Object`，约 20 行）——它们是"带默认值的取值"糖，不属于解析器，改指向新 `Value` 即可。
-
-**大致改动逻辑**
-
-1. 删 `:244-583`，`#include <sdk/golding_json.h>`，`namespace json = golding::json;`（一处别名，
-   让 `:683-810` 的调用点基本不用改）。
-2. 成员名对齐：`Type::Array/String/Number/...` → `Type::array/string/number/...`；
-   `->array` 不变、`->text` 不变（对照 `Json.h:31-46`）。
-3. 4 个助手改为读 `golding::json::Value`，语义照旧（缺键取默认值）。
-4. 顶层键名逐个核对：`layers` / `orbit` / 每层的 `kind radius width lobes innerRatio
-   amplitude phase spin orbit alpha color points marks count` —— 一个都不许漏，
-   漏了就是"某一层静默退回默认形状"。
-
-**与改动前对比**
-
-| 场景 | 改动前 | 改动后 |
-| - | - | - |
-| T-05a 的三条断言 | 绿 | **仍绿**（这是本任务唯一的行为判据） |
-| `shape.json` 里带 `\u` 转义 | 自写解析器不支持（按字面量收） | 支持（共享解析器有 `\uXXXX` 与代理对） |
-| `shape.json` 里出现注释 / 尾逗号 | 自写解析器可能容忍 | 共享解析器一律拒绝（严格 JSON）⇒ 现有 `shape.json` 必须仍是合法 JSON |
-| spellbook 源码 | 一份 340 行解析器副本 | 净减约 320 行 |
-| 其它插件 | — | **不变**（本任务只碰 spellbook） |
-
-**验收**：T-05a 那三条断言全绿；`spellbook.dll` 大小下降（记录到完成行里）；
-`grep -c "namespace json" plugins/core/spellbook/src/SpellbookPlugin.cpp` == 0。
-
-**风险与回退**：风险 = 现有 `shape.json` 里写了注释或尾逗号，换严格解析后**整份失效**，
-法阵退回默认形状且只有一行日志。规避：动手前先跑一次 `python -c "import json;json.load(open(...))"`
-确认它是合法 JSON。回退 = `git revert` 该提交，自写解析器整块回来，T-05a 的断言仍然有效。
+- T-05b spellbook 换用 SDK 解析器 — 已完成（2026-10-25：删掉自写 `namespace json` 340 行与
+  那句"独立于 core 的解析器，插件不链 core"的注释，改 `#include <sdk/golding_json.h>`；
+  保留 4 个取值糖但搬进 `shapejson`（`Text` / `Float` / `Number` / `Object`，约 45 行）。
+  T-05a 那三条断言**不加改动仍绿**（唯一的行为判据）。
+  实测数字：源码 2079 → 1890 行（净减 189；门槛写的 ≥300 未达成——差额是 T-05a 必须
+  新增的 95 行断言）；`grep -c "^namespace json"` == 0；
+  `spellbook.dll` 248,788 → 253,687 B（**没有变小**，与验收预期相反：分离测量
+  = 换解析器 +1,919 B + 自检 +2,980 B；共享解析器比自写那份做的事更多——u 型转义、
+  代理对、深度 64）。动手前已用 `json.load` 确认三个 `shape.json` 都是严格 JSON）
 
 ---
 
@@ -259,7 +231,7 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 | T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 已完成 |
 | T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 已完成 |
 | T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 已完成 |
-| T-05b | spellbook 换用 SDK 解析器 | 0.2.1-b | 未开始 |
+| T-05b | spellbook 换用 SDK 解析器 | 0.2.1-b | 已完成 |
 | T-06 | 文档与契约口径同步 | 0.2.1-c | 未开始 |
 
 完成任务后，本节状态改 `已完成`，§3~§5 对应段落按 **§1.2** 压缩成一行——两处必须同时改。

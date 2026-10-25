@@ -30,6 +30,7 @@
 #include "GoldingServices.h"
 
 #include <sdk/GoldingPlugin.h>
+#include <sdk/golding_json.h>
 
 #include <GoldingMenu.h>
 #include <button/ButtonData.h>
@@ -238,320 +239,27 @@ bool ParseHexColor(const std::string& text, float alpha, std::uint32_t& out)
 }
 
 // ---------------------------------------------------------------------------
-// 极简 JSON（只为 shape.json；独立于 core 的解析器，插件不链 core）
 // ---------------------------------------------------------------------------
-
-namespace json
+// 取值糖（**不是解析器**）
+// ---------------------------------------------------------------------------
+//
+// 解析器本身用共享件 `<sdk/golding_json.h>`——与 core 读 `plugin.json` 是同一份实现。
+// 此前本插件自带 340 行解析器，理由写在当时的注释里："插件不链 core"。那句话
+// 的前半句（头可见）成立、后半句（符号不可用）才是真正的原因；那份实现收成
+// SDK 头之后原因就消失了，副本删掉。
+//
+// 下面这 4 个"带默认值的取值"是**本插件的口味**（缺键取默认 / 取子对象），
+// 与解析器无关，所以留在这里、不进 SDK。
+namespace shapejson
 {
 
-struct Value
-{
-    enum class Type
-    {
-        Null,
-        Bool,
-        Number,
-        String,
-        Array,
-        Object,
-    };
-
-    Type type = Type::Null;
-    bool boolean = false;
-    double number = 0.0;
-    std::string text;
-    std::vector<Value> array;
-    std::vector<std::pair<std::string, Value>> object;
-
-    const Value* find(const char* key) const
-    {
-        if (type != Type::Object)
-        {
-            return nullptr;
-        }
-        for (const auto& entry : object)
-        {
-            if (entry.first == key)
-            {
-                return &entry.second;
-            }
-        }
-        return nullptr;
-    }
-};
-
-class Parser
-{
-public:
-    explicit Parser(const std::string& text) : _text(text) {}
-
-    bool ParseAll(Value& out)
-    {
-        SkipSpace();
-        if (!ParseValue(out, 0))
-        {
-            return false;
-        }
-        SkipSpace();
-        return _pos >= _text.size();
-    }
-
-private:
-    static constexpr int kMaxDepth = 32;
-
-    const std::string& _text;
-    std::size_t _pos = 0;
-
-    void SkipSpace()
-    {
-        while (_pos < _text.size())
-        {
-            const char ch = _text[_pos];
-            if (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r')
-            {
-                ++_pos;
-                continue;
-            }
-            break;
-        }
-    }
-
-    bool Match(char expected)
-    {
-        if (_pos < _text.size() && _text[_pos] == expected)
-        {
-            ++_pos;
-            return true;
-        }
-        return false;
-    }
-
-    bool Literal(const char* word)
-    {
-        std::size_t index = 0;
-        while (word[index] != '\0')
-        {
-            if (_pos + index >= _text.size() || _text[_pos + index] != word[index])
-            {
-                return false;
-            }
-            ++index;
-        }
-        _pos += index;
-        return true;
-    }
-
-    static void AppendUtf8(std::string& out, std::uint32_t code)
-    {
-        if (code < 0x80u)
-        {
-            out.push_back(static_cast<char>(code));
-        }
-        else if (code < 0x800u)
-        {
-            out.push_back(static_cast<char>(0xC0u | (code >> 6)));
-            out.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
-        }
-        else
-        {
-            out.push_back(static_cast<char>(0xE0u | (code >> 12)));
-            out.push_back(static_cast<char>(0x80u | ((code >> 6) & 0x3Fu)));
-            out.push_back(static_cast<char>(0x80u | (code & 0x3Fu)));
-        }
-    }
-
-    bool ParseString(std::string& out)
-    {
-        if (!Match('"'))
-        {
-            return false;
-        }
-        out.clear();
-        while (_pos < _text.size())
-        {
-            const char ch = _text[_pos++];
-            if (ch == '"')
-            {
-                return true;
-            }
-            if (ch != '\\')
-            {
-                out.push_back(ch);
-                continue;
-            }
-            if (_pos >= _text.size())
-            {
-                return false;
-            }
-            const char escape = _text[_pos++];
-            switch (escape)
-            {
-            case '"':
-            case '\\':
-            case '/':
-                out.push_back(escape);
-                break;
-            case 'b':
-                out.push_back('\b');
-                break;
-            case 'f':
-                out.push_back('\f');
-                break;
-            case 'n':
-                out.push_back('\n');
-                break;
-            case 'r':
-                out.push_back('\r');
-                break;
-            case 't':
-                out.push_back('\t');
-                break;
-            case 'u': {
-                if (_pos + 4 > _text.size())
-                {
-                    return false;
-                }
-                std::uint32_t code = 0;
-                for (int i = 0; i < 4; ++i)
-                {
-                    const int digit = HexDigit(_text[_pos + static_cast<std::size_t>(i)]);
-                    if (digit < 0)
-                    {
-                        return false;
-                    }
-                    code = (code << 4) | static_cast<std::uint32_t>(digit);
-                }
-                _pos += 4;
-                AppendUtf8(out, code);
-                break;
-            }
-            default:
-                return false;
-            }
-        }
-        return false;
-    }
-
-    bool ParseValue(Value& out, int depth)
-    {
-        if (depth > kMaxDepth)
-        {
-            return false;
-        }
-        SkipSpace();
-        if (_pos >= _text.size())
-        {
-            return false;
-        }
-        const char ch = _text[_pos];
-        if (ch == '{')
-        {
-            ++_pos;
-            out.type = Value::Type::Object;
-            SkipSpace();
-            if (Match('}'))
-            {
-                return true;
-            }
-            while (true)
-            {
-                SkipSpace();
-                std::string key;
-                if (!ParseString(key))
-                {
-                    return false;
-                }
-                SkipSpace();
-                if (!Match(':'))
-                {
-                    return false;
-                }
-                Value child;
-                if (!ParseValue(child, depth + 1))
-                {
-                    return false;
-                }
-                out.object.emplace_back(std::move(key), std::move(child));
-                SkipSpace();
-                if (Match(','))
-                {
-                    continue;
-                }
-                return Match('}');
-            }
-        }
-        if (ch == '[')
-        {
-            ++_pos;
-            out.type = Value::Type::Array;
-            SkipSpace();
-            if (Match(']'))
-            {
-                return true;
-            }
-            while (true)
-            {
-                Value child;
-                if (!ParseValue(child, depth + 1))
-                {
-                    return false;
-                }
-                out.array.push_back(std::move(child));
-                SkipSpace();
-                if (Match(','))
-                {
-                    continue;
-                }
-                return Match(']');
-            }
-        }
-        if (ch == '"')
-        {
-            out.type = Value::Type::String;
-            return ParseString(out.text);
-        }
-        if (Literal("true"))
-        {
-            out.type = Value::Type::Bool;
-            out.boolean = true;
-            return true;
-        }
-        if (Literal("false"))
-        {
-            out.type = Value::Type::Bool;
-            out.boolean = false;
-            return true;
-        }
-        if (Literal("null"))
-        {
-            out.type = Value::Type::Null;
-            return true;
-        }
-        char* end = nullptr;
-        const double parsed = std::strtod(_text.c_str() + _pos, &end);
-        if (end == _text.c_str() + _pos)
-        {
-            return false;
-        }
-        _pos = static_cast<std::size_t>(end - _text.c_str());
-        out.type = Value::Type::Number;
-        out.number = parsed;
-        return true;
-    }
-};
-
-bool Parse(const std::string& text, Value& out)
-{
-    out = Value{};
-    Parser parser(text);
-    return parser.ParseAll(out);
-}
+using Value = golding::json::Value;
 
 /**取数字；缺省 / 类型不对 → fallback。*/
 double Number(const Value& object, const char* key, double fallback)
 {
     const Value* node = object.find(key);
-    if (node == nullptr || node->type != Value::Type::Number)
+    if (node == nullptr || node->type != Value::Type::number)
     {
         return fallback;
     }
@@ -566,7 +274,7 @@ float Float(const Value& object, const char* key, float fallback)
 std::string Text(const Value& object, const char* key, const std::string& fallback)
 {
     const Value* node = object.find(key);
-    if (node == nullptr || node->type != Value::Type::String)
+    if (node == nullptr || node->type != Value::Type::string)
     {
         return fallback;
     }
@@ -577,11 +285,10 @@ std::string Text(const Value& object, const char* key, const std::string& fallba
 const Value* Object(const Value& object, const char* key)
 {
     const Value* node = object.find(key);
-    return (node != nullptr && node->type == Value::Type::Object) ? node : nullptr;
+    return (node != nullptr && node->type == Value::Type::object) ? node : nullptr;
 }
 
-}  // namespace json
-
+}  // namespace shapejson
 // ---------------------------------------------------------------------------
 // 形状：一层 = 一条极坐标闭合曲线 + 它的描边 / 沿线复制元素
 // ---------------------------------------------------------------------------
@@ -680,11 +387,11 @@ bool ReadAllBytes(const std::string& utf8Path, std::string& out)
 }
 
 /**读一层；`base` 是哈希派生出来的那一份，缺的字段就留它。*/
-ShapeLayer ReadLayer(const json::Value& node, const ShapeLayer& base, float orbitDefault)
+ShapeLayer ReadLayer(const shapejson::Value& node, const ShapeLayer& base, float orbitDefault)
 {
     ShapeLayer layer = base;
 
-    const std::string kind = json::Text(node, "kind", "");
+    const std::string kind = shapejson::Text(node, "kind", "");
     if (kind == "ring")
     {
         layer.kind = LayerKind::Ring;
@@ -706,28 +413,28 @@ ShapeLayer ReadLayer(const json::Value& node, const ShapeLayer& base, float orbi
         layer.kind = LayerKind::Path;
     }
 
-    layer.radius = json::Float(node, "radius", layer.radius);
-    layer.width = json::Float(node, "width", layer.width);
-    layer.lobes = static_cast<int>(json::Number(node, "lobes", layer.lobes));
-    layer.innerRatio = json::Float(node, "innerRatio", layer.innerRatio);
-    layer.amplitude = json::Float(node, "amplitude", layer.amplitude);
-    layer.phaseDeg = json::Float(node, "phase", layer.phaseDeg);
-    layer.spinDeg = json::Float(node, "spin", layer.spinDeg);
-    layer.orbitDeg = json::Float(node, "orbit", orbitDefault);
+    layer.radius = shapejson::Float(node, "radius", layer.radius);
+    layer.width = shapejson::Float(node, "width", layer.width);
+    layer.lobes = static_cast<int>(shapejson::Number(node, "lobes", layer.lobes));
+    layer.innerRatio = shapejson::Float(node, "innerRatio", layer.innerRatio);
+    layer.amplitude = shapejson::Float(node, "amplitude", layer.amplitude);
+    layer.phaseDeg = shapejson::Float(node, "phase", layer.phaseDeg);
+    layer.spinDeg = shapejson::Float(node, "spin", layer.spinDeg);
+    layer.orbitDeg = shapejson::Float(node, "orbit", orbitDefault);
 
-    const float alpha = json::Float(node, "alpha", 1.0f);
-    ParseHexColor(json::Text(node, "color", ""), alpha, layer.color);
+    const float alpha = shapejson::Float(node, "alpha", 1.0f);
+    ParseHexColor(shapejson::Text(node, "color", ""), alpha, layer.color);
 
     // `points`：`[[x,y], …]`，归一化 -1..1 —— 就是 SVG path 的顶点表。
-    if (const json::Value* points = node.find("points");
-        points != nullptr && points->type == json::Value::Type::Array)
+    if (const shapejson::Value* points = node.find("points");
+        points != nullptr && points->type == shapejson::Value::Type::array)
     {
         layer.points.clear();
-        for (const json::Value& pair : points->array)
+        for (const shapejson::Value& pair : points->array)
         {
-            if (pair.type == json::Value::Type::Array && pair.array.size() >= 2
-                && pair.array[0].type == json::Value::Type::Number
-                && pair.array[1].type == json::Value::Type::Number)
+            if (pair.type == shapejson::Value::Type::array && pair.array.size() >= 2
+                && pair.array[0].type == shapejson::Value::Type::number
+                && pair.array[1].type == shapejson::Value::Type::number)
             {
                 layer.points.push_back(static_cast<float>(pair.array[0].number));
                 layer.points.push_back(static_cast<float>(pair.array[1].number));
@@ -735,21 +442,21 @@ ShapeLayer ReadLayer(const json::Value& node, const ShapeLayer& base, float orbi
         }
     }
 
-    if (const json::Value* marks = json::Object(node, "marks"))
+    if (const shapejson::Value* marks = shapejson::Object(node, "marks"))
     {
-        layer.markCount = static_cast<int>(json::Number(*marks, "count", layer.markCount));
-        layer.markLength = json::Float(*marks, "length", layer.markLength);
-        layer.markSize = json::Float(*marks, "size", layer.markSize);
-        layer.markOffset = json::Float(*marks, "offset", layer.markOffset);
-        ParseHexColor(json::Text(*marks, "color", ""), json::Float(*marks, "alpha", 0.55f), layer.markColor);
+        layer.markCount = static_cast<int>(shapejson::Number(*marks, "count", layer.markCount));
+        layer.markLength = shapejson::Float(*marks, "length", layer.markLength);
+        layer.markSize = shapejson::Float(*marks, "size", layer.markSize);
+        layer.markOffset = shapejson::Float(*marks, "offset", layer.markOffset);
+        ParseHexColor(shapejson::Text(*marks, "color", ""), shapejson::Float(*marks, "alpha", 0.55f), layer.markColor);
     }
 
-    if (const json::Value* runes = json::Object(node, "runes"))
+    if (const shapejson::Value* runes = shapejson::Object(node, "runes"))
     {
-        layer.runeCount = static_cast<int>(json::Number(*runes, "count", layer.runeCount));
-        layer.runeSize = json::Float(*runes, "size", layer.runeSize);
-        layer.runeOffset = json::Float(*runes, "offset", layer.runeOffset);
-        ParseHexColor(json::Text(*runes, "color", ""), json::Float(*runes, "alpha", 0.9f), layer.runeColor);
+        layer.runeCount = static_cast<int>(shapejson::Number(*runes, "count", layer.runeCount));
+        layer.runeSize = shapejson::Float(*runes, "size", layer.runeSize);
+        layer.runeOffset = shapejson::Float(*runes, "offset", layer.runeOffset);
+        ParseHexColor(shapejson::Text(*runes, "color", ""), shapejson::Float(*runes, "alpha", 0.9f), layer.runeColor);
     }
 
     layer.lobes = std::clamp(layer.lobes, 2, 24);
@@ -782,21 +489,21 @@ ShapeLayer ReadLayer(const json::Value& node, const ShapeLayer& base, float orbi
  */
 bool ParseShapeDocument(const std::string& text, std::uint32_t hash, PluginShape& out)
 {
-    json::Value root;
-    if (!json::Parse(text, root) || root.type != json::Value::Type::Object)
+    shapejson::Value root;
+    if (!golding::json::parse(text, root) || root.type != shapejson::Value::Type::object)
     {
         return false;
     }
 
-    const float orbit = json::Float(root, "orbit", kDefaultOrbitDeg);
-    if (const json::Value* radius = root.find("radius"); radius != nullptr && radius->type == json::Value::Type::Number)
+    const float orbit = shapejson::Float(root, "orbit", kDefaultOrbitDeg);
+    if (const shapejson::Value* radius = root.find("radius"); radius != nullptr && radius->type == shapejson::Value::Type::number)
     {
         out.baseRadius = std::clamp(static_cast<float>(radius->number), 0.02f, 1.20f);
         out.hasBaseRadius = true;
     }
 
-    const json::Value* layers = root.find("layers");
-    if (layers == nullptr || layers->type != json::Value::Type::Array || layers->array.empty())
+    const shapejson::Value* layers = root.find("layers");
+    if (layers == nullptr || layers->type != shapejson::Value::Type::array || layers->array.empty())
     {
         return false;
     }
@@ -805,8 +512,8 @@ bool ParseShapeDocument(const std::string& text, std::uint32_t hash, PluginShape
     std::vector<ShapeLayer> parsed;
     for (std::size_t index = 0; index < layers->array.size() && index < 6; ++index)
     {
-        const json::Value& node = layers->array[index];
-        if (node.type != json::Value::Type::Object)
+        const shapejson::Value& node = layers->array[index];
+        if (node.type != shapejson::Value::Type::object)
         {
             continue;
         }
