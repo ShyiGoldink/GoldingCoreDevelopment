@@ -60,6 +60,10 @@ find_package(inking CONFIG REQUIRED)
 # ---- 2. 宿主 exe ----
 add_executable(golding_host main.cpp)
 target_link_libraries(golding_host PRIVATE golding_core inking::inking)
+# 宿主 exe 要读 core 的注册表接口（`Application/PageRegistry.h` 等），这些头有编译期
+# 守卫 `GOLDING_CORE_INTERNAL`（见根 CMakeLists 的注释）。sdk_host_tests 不给这个宏——
+# 它代表的是外部使用者。
+target_compile_definitions(golding_host PRIVATE GOLDING_CORE_INTERNAL)
 
 if (MSVC)
     target_compile_options(golding_host PRIVATE /W4)
