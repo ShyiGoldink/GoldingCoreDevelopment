@@ -8,6 +8,8 @@
 #include <shellapi.h>
 #include <tlhelp32.h>
 
+#include <sdk/golding_json.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -127,84 +129,6 @@ void WriteIni(const std::filesystem::path& file, const std::map<std::string, std
     {
         stream << key << '=' << value << '\n';
     }
-}
-
-/** 极简清单读：在 `"apps"` 之后找 `[` … `]`，逐个取引号串。够用即可。 */
-std::vector<std::string> ReadManifestIds(const std::filesystem::path& file)
-{
-    std::vector<std::string> ids;
-    std::error_code ec;
-    if (!std::filesystem::is_regular_file(file, ec))
-    {
-        return ids;
-    }
-    std::ifstream stream(file, std::ios::binary);
-    if (!stream)
-    {
-        return ids;
-    }
-    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-
-    const std::size_t appsKey = text.find("\"apps\"");
-    if (appsKey == std::string::npos)
-    {
-        return ids;
-    }
-    const std::size_t begin = text.find('[', appsKey);
-    if (begin == std::string::npos)
-    {
-        return ids;
-    }
-    const std::size_t end = text.find(']', begin);
-    if (end == std::string::npos)
-    {
-        return ids;
-    }
-
-    std::size_t index = begin + 1;
-    while (index < end)
-    {
-        const std::size_t quote = text.find('"', index);
-        if (quote == std::string::npos || quote >= end)
-        {
-            break;
-        }
-        std::string id;
-        std::size_t cursor = quote + 1;
-        while (cursor < end && text[cursor] != '"')
-        {
-            if (text[cursor] == '\\' && cursor + 1 < end)
-            {
-                ++cursor;
-            }
-            id.push_back(text[cursor]);
-            ++cursor;
-        }
-        if (!id.empty())
-        {
-            ids.push_back(id);
-        }
-        index = cursor + 1;
-    }
-    return ids;
-}
-
-bool WriteManifestIds(const std::filesystem::path& file, const std::vector<std::string>& ids)
-{
-    std::error_code ec;
-    std::filesystem::create_directories(file.parent_path(), ec);
-    std::ofstream stream(file, std::ios::binary | std::ios::trunc);
-    if (!stream)
-    {
-        return false;
-    }
-    stream << "{\n  \"version\": 1,\n  \"apps\": [";
-    for (std::size_t index = 0; index < ids.size(); ++index)
-    {
-        stream << (index == 0 ? "" : ", ") << '"' << ids[index] << '"';
-    }
-    stream << "]\n}\n";
-    return static_cast<bool>(stream);
 }
 
 /** 把一个中文 / 带空格的文件名压成 ASCII slug；压不出来就用 `app`。 */
@@ -537,6 +461,85 @@ std::filesystem::path AppDir(const std::string& id) { return AppsDir() / FromUtf
 
 // ---- 读写 ----
 
+bool ReadManifestFile(const std::filesystem::path& file, std::vector<std::string>& ids)
+{
+    ids.clear();
+
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(file, ec))
+    {
+        return false;
+    }
+    std::ifstream stream(file, std::ios::binary);
+    if (!stream)
+    {
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+
+    golding::json::Value root;
+    if (!golding::json::parse(text, root) || root.type != golding::json::Value::Type::object)
+    {
+        std::printf("[appmanager] 清单不是合法 JSON 对象：%s\n", ToUtf8(file).c_str());
+        return false;
+    }
+
+    const golding::json::Value* apps = root.find("apps");
+    if (apps == nullptr || apps->type != golding::json::Value::Type::array)
+    {
+        std::printf("[appmanager] 清单里没有 apps 数组：%s\n", ToUtf8(file).c_str());
+        return false;
+    }
+
+    for (const golding::json::Value& item : apps->array)
+    {
+        if (item.type != golding::json::Value::Type::string)
+        {
+            // 老语义：能读几个是几个。跳一个留一行痕，好过整份作废。
+            std::printf("[appmanager] 清单 apps 里有非字符串项，跳过\n");
+            continue;
+        }
+        ids.push_back(item.text);
+    }
+    return true;
+}
+
+bool WriteManifestFile(const std::filesystem::path& file, const std::vector<std::string>& ids)
+{
+    std::error_code ec;
+    std::filesystem::create_directories(file.parent_path(), ec);
+    std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+    if (!stream)
+    {
+        std::printf("[appmanager] 写不进 %s\n", ToUtf8(file).c_str());
+        return false;
+    }
+
+    golding::json::Value root;
+    root.type = golding::json::Value::Type::object;
+
+    golding::json::Value version;
+    version.type = golding::json::Value::Type::number;
+    version.number = 1.0;
+    root.object.emplace_back("version", version);
+
+    golding::json::Value apps;
+    apps.type = golding::json::Value::Type::array;
+    for (const std::string& id : ids)
+    {
+        golding::json::Value item;
+        item.type = golding::json::Value::Type::string;
+        item.text = id;
+        apps.array.push_back(std::move(item));
+    }
+    root.object.emplace_back("apps", apps);
+
+    // 紧凑一行（`dump` 不做 pretty）。老格式是手拼的缩进版，换过来顺便把
+    // "id 里有引号 / 反斜杠写出一份读不回来的文件"这个洞堵上。
+    stream << golding::json::dump(root) << '\n';
+    return static_cast<bool>(stream);
+}
+
 bool Load(std::vector<AppEntry>& out, bool* seeded)
 {
     out.clear();
@@ -548,7 +551,8 @@ bool Load(std::vector<AppEntry>& out, bool* seeded)
     std::error_code ec;
     std::filesystem::create_directories(AppsDir(), ec);
 
-    std::vector<std::string> ids = ReadManifestIds(ManifestPath());
+    std::vector<std::string> ids;
+    ReadManifestFile(ManifestPath(), ids);
     if (ids.empty())
     {
         // 没有清单 = 第一次跑（或清单被手删了）。备份可疑文件再播种。
@@ -625,7 +629,7 @@ bool SaveManifest(const std::vector<AppEntry>& entries)
     {
         ids.push_back(entry.id);
     }
-    return WriteManifestIds(ManifestPath(), ids);
+    return WriteManifestFile(ManifestPath(), ids);
 }
 
 bool CreateApp(const std::filesystem::path& target, std::vector<AppEntry>& out, AppEntry* created)

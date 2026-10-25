@@ -130,49 +130,15 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 
 ### T-04 appmanager 清单读写换共享件
 
-- **状态**：未开始
-- **落点**：`plugins/core/appmanager/src/AppStore.cpp:133-190`（`ReadManifestIds`）、
-  `:192-210`（`WriteManifestIds`）、`:540`（`Load`）、`:620`（`SaveManifest`）；
-  `plugins/core/appmanager/src/AppManagerPlugin.cpp`（自检）
-
-**准备怎么改**
-
-用 `json::parse` / `json::dump` 换掉手写扫描，并**顺手把读写抽成按路径的纯函数**
-（`ReadManifestFile(path, ids)` / `WriteManifestFile(path, ids)`），因为断开路径才喂得进
-临时文件、才写得出断言——现在是硬绑 `ManifestPath()`，自检只能碰用户真实清单。
-
-不做的事：ini 读写不动（ini 不是 JSON，换解析器与它无关）；不抽 `ManifestValue` 转换层
-（多一层只为好看，调用点只两个）。
-
-**大致改动逻辑**
-
-1. 把 `ReadManifestIds` 改名为 `ReadManifestFile(path, ids)`：`parse` 成功且 `apps` 是
-   字符串数组才收；单个元素类型不对就跳过并 `warn`（与现状"能读几个是几个"一致）。
-2. `WriteManifestFile(path, ids)`：拼 `Value{object}`（`version`=1、`apps`=字符串数组），
-   交给 `dump` 落盘。
-3. `Load` / `SaveManifest` 改调这两个，`ManifestPath()` 只在这两处出现（保持"路径只有一个来源"）。
-4. 自检新增：临时目录写一份 `{"version":1,"apps":["a","\u4e2d\u6587"]}` → `ReadManifestFile`
-   读回 2 项且第二项是 `中文`；再 `WriteManifestFile` → 重读仍相等；跑完删目录。
-
-**与改动前对比**
-
-| 场景 | 改动前 | 改动后 |
-| - | - | - |
-| 正常清单 | 手写扫描 | `json::parse` + 取 `apps` |
-| id 里带 `\uXXXX` 转义 | 读成 `u4e2d` 字面量（跳过 `\` 后按普通字符收） | 正确解成 `中` |
-| 清单里有嵌套数组 | `find(']')` 在第一个 `]` 截断，尾部 id 全丢 | 按结构解析，不再截断 |
-| 写出的格式 | 手拼，无转义 | `dump`，转义合法 |
-| 清单整体损坏 | 读不到 `"apps"` 就返回空 → 走 `.bak` + 重新播种 10 项 | **不变**（同样的兜底路径，只是判定更严格） |
-| ini 读写 / `apps/<id>/` 目录 | 手写 ini | **不变**（本轮不动） |
-
-**验收**：`[ok] appmanager.清单读写：转义/嵌套/往返`（临时目录，跑完清理）；
-现有 10 条 appmanager 断言不加改动仍然绿；`host.collapsed` 与 `host.immersive` 仍绿。
-
-**风险与回退**：风险 = 判定变严（部分损坏的清单以前能读出几条，现在整份失败 → 触发重新播种，
-用户会看到预置十项而不是自己那几条）。这是**有意的行为变化**，需在 `docs/APPMANAGER.md`
-§3.2 补一句"清单解析失败 = 整份作废"。
-回退 = `ReadManifestFile` 保留旧实现作 fallback 分支是多余的，直接 `git revert`；用户数据未被删
-（`.bak` 机制不动），最坏情况是清单被改名后重新播种。
+- T-04 appmanager 清单读写换共享件 — 已完成（2026-10-25：删掉 `ReadManifestIds` /
+  `WriteManifestIds` 那段手写扫描，换成按路径的 `ReadManifestFile` / `WriteManifestFile`
+  （对外，喂得进临时文件才写得出断言）；解析走 `json::parse`、落盘走 `json::dump`。
+  `ManifestPath()` 仍只出现在 `Load` / `SaveManifest` 两处。自检新增
+  `[ok] appmanager.清单读写：转义/嵌套/往返`（临时目录，读到 3 项 a / 中文 / b、
+  嵌套数组项跳过、写回再读一致，跑完删目录）；原有 18 条 appmanager 断言不加改动仍绿，
+  build 8 项全绿。门槛里的"改名验证"用损坏清单实测：日志出
+  `清单不是合法 JSON 对象` → 改名 `apps.json.bak` → 重新播种 10 项 → 用户清单已还原。
+  `docs/APPMANAGER.md` §3.2 已补"整份作废"口径）
 
 ---
 
@@ -320,7 +286,7 @@ spellbook 现在**一条断言都没有**（`Ready` 直接 `return 0`），所�
 | T-01 | 把读取器搬成 `include/sdk/golding_json.h` | 0.2.1-a | 已完成 |
 | T-02 | 给 core 内部头加编译期守卫 | 0.2.1-a | 已完成 |
 | T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 已完成 |
-| T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 未开始 |
+| T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 已完成 |
 | T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 未开始 |
 | T-05b | spellbook 换用 SDK 解析器 | 0.2.1-b | 未开始 |
 | T-06 | 文档与契约口径同步 | 0.2.1-c | 未开始 |

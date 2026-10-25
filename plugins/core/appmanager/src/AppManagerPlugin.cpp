@@ -164,6 +164,42 @@ int runReady(const golding::Host& host)
                           "id=" + created.id + " dir=" + (dirOk ? "有" : "无"));
     }
 
+    // 清单读写：临时目录里走一遍"读（转义 / 嵌套）→ 写 → 再读"，跑完删目录。
+    //
+    // 三条一次钉全，都是老的手写扫描做不到的事：
+    //   - `\uXXXX` 转义要解成汉字（老实现按字面量收，读成 `u4e2d`）；
+    //   - 嵌套数组**后面的** id 不能丢（老实现在第一个 `]` 就截断）；
+    //   - 写出去的那份必须能被自己读回来（老实现手拼、不做转义）。
+    {
+        std::error_code ec;
+        const std::filesystem::path dir =
+            std::filesystem::temp_directory_path() / L"golding-appmanager-manifest-probe";
+        std::filesystem::create_directories(dir, ec);
+        const std::filesystem::path file = dir / L"apps.json";
+
+        const std::string sample =
+            "{\"version\":1,\"apps\":[\"a\",\"\\u4e2d\\u6587\",[\"nested\"],\"b\"]}";
+        {
+            std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+            stream << sample;
+        }
+
+        std::vector<std::string> ids;
+        const bool read = appmanager::ReadManifestFile(file, ids);
+        const bool readOk = read && ids.size() == 3 && ids[0] == "a" && ids[1] == "\xe4\xb8\xad\xe6\x96\x87" &&
+                            ids[2] == "b";
+
+        std::vector<std::string> again;
+        const bool roundTrip = appmanager::WriteManifestFile(file, ids) &&
+                               appmanager::ReadManifestFile(file, again) && again == ids;
+
+        std::filesystem::remove_all(dir, ec);
+        failures += check("清单读写：转义/嵌套/往返", readOk && roundTrip,
+                          "读到 " + std::to_string(ids.size()) + " 项" +
+                              (ids.size() == 3 ? "（a / 中文 / b，嵌套项已跳过）" : "") +
+                              " 往返=" + (roundTrip ? "一致" : "不一致"));
+    }
+
     // 点击链：语义点击侧栏第二行 → 选中变了 + 页面重建。走的是与真机同一条回调。
     auto* root = static_cast<inking::InkingWidget*>(host.UiRoot());
     inking::InkingScene* scene = root != nullptr ? root->GetScene() : nullptr;

@@ -78,6 +78,23 @@ std::filesystem::path AppDir(const std::string& id);
  */
 bool Load(std::vector<AppEntry>& out, bool* seeded = nullptr);
 
+/**
+ * @brief 读一份清单文件——**按路径**，不绑 `ManifestPath()`。
+ *
+ * 断开路径才喂得进临时文件、才写得出断言：绑定 `ManifestPath()` 的自检只能碰用户
+ * 真实清单。解析走共享件 `<sdk/golding_json.h>`，换掉原来那段手写扫描
+ * （`find("\"apps\"") → find('[') → find(']')`）：后者会在**第一个** `]` 就截断，
+ * 嵌套数组后面的 id 全丢，也读不懂 `\uXXXX` 转义。
+ *
+ * @return 解析成功**且** `apps` 是数组。整份不合法就整份作废（见 `docs/APPMANAGER.md`
+ *         §3.2），不挑着收；数组里有非字符串项时跳过该项并留一行 WARN——
+ *         "能读几个是几个"这条老语义保留。
+ */
+bool ReadManifestFile(const std::filesystem::path& file, std::vector<std::string>& ids);
+
+/** 写一份清单文件（`version` + `apps`），转义交给 `json::dump`。 */
+bool WriteManifestFile(const std::filesystem::path& file, const std::vector<std::string>& ids);
+
 /** 写一条到 `apps/<id>/app.ini`（目录不存在会建）。 */
 bool SaveEntry(const AppEntry& entry);
 
