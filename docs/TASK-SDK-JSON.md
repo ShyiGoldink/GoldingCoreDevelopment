@@ -119,38 +119,12 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 
 ### T-03 给 SDK 加极小 `dump`（写侧）
 
-- **状态**：未开始
-- **落点**：`include/sdk/golding_json.h`（`dump` + 内部 `escape`）
-
-**准备怎么改**
-
-读取器只读不写，而 `apps.json` 是要写的。加**一个** `std::string dump(const Value&)`。
-不提供 pretty（缩进会把"格式化"变成第二个语义决策点，需要时再加参数，默认行为不变）；
-不提供构造器（`Value` 成员公开，拼装十行就够，加了反而多一套要维护的 DSL）。
-转义策略定死：只转 `"`、`\` 与 `<0x20` 控制字符（`\n \t \r \b \f` 用具名转义），
-其余**原样输出 UTF-8**、不转 `\u`（与 `parse` 能读回来的最小集合对称）。
-
-**大致改动逻辑**
-
-1. 头里加 `inline void appendEscaped(std::string& out, const std::string& text)`。
-2. `inline std::string dump(const Value&)` 按 `type` 分派；number 用 `%.17g` 保往返精度，
-   整数值不输出小数点（`31.0` → `31`）。
-3. 数组 / object 用 `,` 无空格（体积最小；要好看是 pretty 的活，不做）。
-
-**与改动前对比**
-
-| 场景 | 改动前 | 改动后 |
-| - | - | - |
-| 需要写 JSON 的插件 | 只能手拼字符串（无转义） | `json::dump(value)` |
-| 往返 | 不可断言 | `parse(dump(v))` 结构相等（T-03 验收里钉死） |
-| `dump` 对非 ASCII | — | 原样输出 UTF-8（**不转 `\u`**，`parse` 照样读得回来） |
-| 读取器 `parse` | — | **不变**，本任务不碰它 |
-
-**验收**：`sdk_host` 新增 `[ok] json.dump 往返`（含 `"` `\` 换行 中文 各一条）与
-`[ok] json.dump 整数不带小数点`。
-
-**风险与回退**：风险 = 浮点精度选错（`%g` 默认 6 位会吃掉精度）⇒ 固定 `%.17g` 并用往返用例钉住。
-回退 = `dump` 是新增函数，没人调就没有影响，删掉即回退。
+- T-03 给 SDK 加极小 `dump`（写侧）— 已完成（2026-10-25：`golding_json.h` 新增
+  `appendEscaped` + `dump`：转义只转 `"` / `\` / `<0x20`（后者里五个用具名转义，再其余
+  转成 u 型转义），非 ASCII 原样输出 UTF-8 不转；number 走 `%.17g`，整数值不输出小数点，
+  非有限数落 `null`（兜住手拼的 Value，保证输出永远是合法 JSON）。`sdk_host` 新增 9 条
+  `json.dump` 断言：往返（引号 / 反斜杠 / 换行 / 中文 / 嵌套数组）、非 ASCII 不转转义、
+  整数不带小数点、负整数、`%.17g` 精度）
 
 ---
 
@@ -345,7 +319,7 @@ spellbook 现在**一条断言都没有**（`Ready` 直接 `return 0`），所�
 | - | - | - | - |
 | T-01 | 把读取器搬成 `include/sdk/golding_json.h` | 0.2.1-a | 已完成 |
 | T-02 | 给 core 内部头加编译期守卫 | 0.2.1-a | 已完成 |
-| T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 未开始 |
+| T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 已完成 |
 | T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 未开始 |
 | T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 未开始 |
 | T-05b | spellbook 换用 SDK 解析器 | 0.2.1-b | 未开始 |

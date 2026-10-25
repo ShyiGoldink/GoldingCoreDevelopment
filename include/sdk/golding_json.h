@@ -17,6 +17,8 @@
 // **不抛异常**（本仓铁律：异常不得穿 dll 边界）：失败一律返回 false。
 
 #include <cctype>
+#include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <utility>
@@ -477,6 +479,129 @@ inline bool parse(const std::string& text, Value& out)
 {
     detail::Parser parser(text);
     return parser.ParseDocument(out);
+}
+
+// ---- 写侧 ----
+//
+// 只有一个 `dump`。不提供 pretty（缩进会把"格式化"变成第二个语义决策点），
+// 不提供构造器（`Value` 成员公开，拼装十行就够，加了反而多一套要维护的 DSL）。
+//
+// 转义策略定死：只转 `"`、`\` 与 `<0x20` 的控制字符（后者里 `\n \t \r \b \f`
+// 用具名转义，其余用 `\u00XX`），其余**原样输出 UTF-8、不转 `\u`**——
+// 与 `parse` 能读回来的最小集合对称。
+
+/**按 JSON 字符串规则把 `text` 追加进 `out`（不含两侧的引号由调用方处理）。*/
+inline void appendEscaped(std::string& out, const std::string& text)
+{
+    out.push_back('"');
+    for (const char raw : text)
+    {
+        switch (raw)
+        {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(raw) < 0x20u)
+            {
+                // 其余控制字符没有具名转义，JSON 也不允许裸着出现 ⇒ 只能 \u00XX
+                char hex[8] = {};
+                std::snprintf(hex, sizeof(hex), "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(raw)));
+                out += hex;
+            }
+            else
+            {
+                out.push_back(raw); // 非 ASCII 原样输出 UTF-8：`parse` 照样读得回来
+            }
+            break;
+        }
+    }
+    out.push_back('"');
+}
+
+namespace detail
+{
+
+/**`%.17g` 保往返精度；整数值不输出小数点（`31.0` → `31`）。*/
+inline void appendNumber(double number, std::string& out)
+{
+    if (!std::isfinite(number))
+    {
+        // `parse` 产不出非有限数；这里兜住"手拼的 Value"。宁可丢一个值，
+        // 也不写出一份 `nan` / `inf` 让下一次 parse 整份失败。
+        out += "null";
+        return;
+    }
+
+    char buffer[40] = {};
+    if (std::floor(number) == number && std::fabs(number) < 1e17)
+    {
+        std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(number));
+    }
+    else
+    {
+        std::snprintf(buffer, sizeof(buffer), "%.17g", number);
+    }
+    out += buffer;
+}
+
+inline void dumpValue(const Value& value, std::string& out)
+{
+    switch (value.type)
+    {
+    case Value::Type::null:
+        out += "null";
+        break;
+    case Value::Type::boolean:
+        out += value.boolean ? "true" : "false";
+        break;
+    case Value::Type::number:
+        appendNumber(value.number, out);
+        break;
+    case Value::Type::string:
+        appendEscaped(out, value.text);
+        break;
+    case Value::Type::array:
+        out.push_back('[');
+        for (std::size_t i = 0; i < value.array.size(); ++i)
+        {
+            if (i != 0)
+            {
+                out.push_back(',');
+            }
+            dumpValue(value.array[i], out);
+        }
+        out.push_back(']');
+        break;
+    case Value::Type::object:
+        out.push_back('{');
+        for (std::size_t i = 0; i < value.object.size(); ++i)
+        {
+            if (i != 0)
+            {
+                out.push_back(',');
+            }
+            appendEscaped(out, value.object[i].first);
+            out.push_back(':');
+            dumpValue(value.object[i].second, out);
+        }
+        out.push_back('}');
+        break;
+    }
+}
+
+} // namespace detail
+
+/**序列化成紧凑 JSON（`,"` 之间无空格）。返回的文本一定能被 `parse` 读回来。*/
+inline std::string dump(const Value& value)
+{
+    std::string out;
+    detail::dumpValue(value, out);
+    return out;
 }
 
 } // namespace json

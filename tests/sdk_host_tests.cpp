@@ -318,6 +318,60 @@ int main()
         check("json.parse 裸键 → false", !json::parse(R"({a:1})", junk));
         check("json.parse 空文本 → false", !json::parse("", junk));
         check("json.parse 后跟垃圾 → false", !json::parse("{} {}", junk));
+
+        // dump 往返：`"` `\` 换行 中文 各来一条，`parse(dump(v))` 必须结构相等
+        auto makeString = [](const std::string& text) {
+            json::Value out;
+            out.type = json::Value::Type::string;
+            out.text = text;
+            return out;
+        };
+        auto makeNumber = [](double number) {
+            json::Value out;
+            out.type = json::Value::Type::number;
+            out.number = number;
+            return out;
+        };
+
+        json::Value sample;
+        sample.type = json::Value::Type::object;
+        sample.object.emplace_back("quote", makeString("a\"b\\c"));
+        sample.object.emplace_back("newline", makeString("d\ne\tf"));
+        sample.object.emplace_back("cjk", makeString("中文"));
+        json::Value nested;
+        nested.type = json::Value::Type::array;
+        nested.array.push_back(makeNumber(31.0));
+        nested.array.push_back(makeNumber(2.5));
+        sample.object.emplace_back("list", nested);
+
+        const std::string written = json::dump(sample);
+        json::Value again;
+        const bool okRound = json::parse(written, again);
+        check("json.dump 往返", okRound && again.type == json::Value::Type::object);
+        if (okRound)
+        {
+            const json::Value* quote = again.find("quote");
+            const json::Value* newline = again.find("newline");
+            const json::Value* cjk = again.find("cjk");
+            const json::Value* list = again.find("list");
+            check("json.dump 往返：引号与反斜杠", quote != nullptr && quote->text == "a\"b\\c",
+                  quote != nullptr ? quote->text : "");
+            check("json.dump 往返：换行与制表", newline != nullptr && newline->text == "d\ne\tf");
+            check("json.dump 往返：中文原样", cjk != nullptr && cjk->text == "\xe4\xb8\xad\xe6\x96\x87",
+                  cjk != nullptr ? cjk->text : "");
+            check("json.dump 往返：嵌套数组",
+                  list != nullptr && list->array.size() == 2 && list->array[0].number == 31.0 &&
+                      list->array[1].number == 2.5);
+        }
+        check("json.dump 非 ASCII 不转 \\u", written.find("\\u") == std::string::npos, written);
+
+        check("json.dump 整数不带小数点", json::dump(makeNumber(31.0)) == "31", json::dump(makeNumber(31.0)));
+        check("json.dump 负数整数", json::dump(makeNumber(-7.0)) == "-7", json::dump(makeNumber(-7.0)));
+        check("json.dump 小数保留", json::dump(makeNumber(2.5)) == "2.5", json::dump(makeNumber(2.5)));
+
+        json::Value third;
+        const bool okThird = json::parse(json::dump(makeNumber(1.0 / 3.0)), third);
+        check("json.dump 往返精度 %.17g", okThird && third.number == 1.0 / 3.0);
     }
 
     // ---- 7. 空 api 不崩（宿主缺席时的降级路径）----
