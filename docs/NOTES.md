@@ -70,6 +70,22 @@
 收拉必须落到**几何**上（改宽度）。静态面板没有 `Resize`，所以会变尺寸的容器只能是
 `InkingDynamicWidget`（侧栏就是为此做成动态档的）。
 
+**反过来：收起的容器也不要 `SetVisible(false)`。** 宽度 0 已经不画、不命中，而一隐藏
+它就从绘制列表里消失，动态档的 `Tick` 也跟着停——展开动画根本没法从 0 起步。抽屉就靠
+"宽度是唯一状态"这一条撑着。
+
+**顶栏下面的那一块必须是动态档。** `MenuBarStyle::hideInFullscreen` 全屏时让整条顶栏
+消失，`GetCurrentHeight()` 从 44 变 0；而 `MenuBar` 是静态面板，改不了自己的尺寸，
+布局求解器又不跳过不可见项 ⇒ **在 Stack 里给它固定高、或把 body 的 y/高在 `create`
+里算一次就完事，全屏后顶上都会留一条 44px 的空白**。正确做法：body 也用
+`InkingDynamicWidget`，每逻辑步问一次 `GetCurrentHeight()`，变了就贴到顶栏下面并
+`Relayout()`。启动即全屏（`--fullscreen`）看不出这个 bug——那时 `create` 读到的
+`GetCurrentHeight()` 本来就是 0，只有**运行期**切全屏才暴露。
+
+**（侧栏动态档的两条纪律）** 不要声明 `OwnsSubtreeHit()`（子孙不进命中表，条目点不到）；
+`HitTest` 要自己答"点在不在我这块矩形上"，否则容器在命中上是个透明洞。抽屉动画还要
+`HasSubtreeClip()` 返回 true：动画中途条目得剪在侧栏那块里，否则会溢到内容区上。
+
 **`fillMain` 之后的项会被挤出容器。** 求解器按顺序给 `fillMain` 分"剩余空间"，但**不预留**
 它后面那些项的尺寸：MenuBar 的弹簧因此把两个窗口按钮顶到画布外；设置弹窗里"弹簧 + 底部
 按钮"也因此只剩一条边。规则：**`fillMain` 的项放最后**；要固定贴边的元素（关闭按钮）
@@ -79,8 +95,17 @@
 （`--collapsed` 一进来就收着侧栏）。宿主要是等装配完再 `setBootMode`，插件读到的永远是
 空串——而且只有"插件真的读它"时才暴露，不读的插件一切正常。
 
-**（侧栏动态档的两条纪律）** 不要声明 `OwnsSubtreeHit()`（子孙不进命中表，条目点不到）；
-`HitTest` 要自己答"点在不在我这块矩形上"，否则容器在命中上是个透明洞。
+**`InkingStaticButton` 的文字在浅色下会画成空心描边。** 同一条按钮，`textColor`
+是深色（`0xFF33303C`）时是实心字；换成纯白或近白（`0xFFF6F3FB`）就只剩一圈抗锯齿
+边缘——字心是透明的。这不是"白色被当透明"，因为浅紫底色照常画得出来。规避办法：
+**深底配深字、浅底配深字**，别指望白色文字。`appmanager` 的启动按钮因此是
+"浅紫底 + 深紫字"，而不是常见的"紫底白字"。
+
+**`graveyard`（延迟销毁的旧节点）不能用 `RunAfterFrames` 清。** 那条路在
+`--frames`（CI / 截图）模式下根本不派发，节点会一直躺着，直到进程退出时随静态
+`g_parts` 一起析构——而那时场景已经销毁，`~InkingWidget` 里的 `RemoveDrawNode`
+是一次 use-after-free，**退出码 0xC0000005**，日志却一切正常。正确做法：挂在
+动态档的 `onTick` 开头清（`BodyLayer::SetDeferredSweep`），两个模式走同一条路。
 
 **`InkingFixedPopup` 的描边其实画不出来。** 它在 `.cpp` 里实现了 `onRenderDecoration`
 （描边走装饰遍），但**没有重写 `HasRenderDecoration()`**——那个默认返回 false，场景因此
@@ -101,6 +126,43 @@
 **菜单声明的生命周期**：`golding.menu` 的 `MenuDecl` 只需要在 `open` 调用期间有效——
 面板打开那一刻把整棵树**深拷贝**进自己的表。所以插件可以现场拼栈上的 `std::vector`
 （"设置区块装配后才有"这类动态内容就是这么来的），open 返回后就能扔。
+
+**弹窗声明也是同一个规矩，但面板必须自己兜住。** `GoldingPopupDecl` 只承诺在 `push`
+调用期间有效：插件把 `const GoldingPopupDecl decl{...}` 写在栈上是**最自然**的写法。
+面板要是把它当指针存下来，`pop` 那一刻读到的就是那个栈帧被覆盖之后的内存——表现是
+**每次关闭弹窗都闪退**，而且崩在 `onClose` 上，看起来像插件写错了。现在
+`GoldingGamestoryShell` 存的是 `std::optional<GoldingPopupDecl>` + 自己那份 `id`
+字符串（值拷贝）。**任何时候都别在服务里存调用方的声明指针。**
+
+**不要在按钮的回调栈里销毁按钮（或它的祖先）。** 两条实测过的路：
+
+1. `push` 一个新的模态框会重建弹窗。如果这个 `push` 是"设置区块里的
+   「用户指针…」按钮"发起的，旧弹窗（连同那颗按钮）就在回调栈上——当场
+   `RemoveChild` 就是 use-after-free。面板的做法是**先摘下来放进 `graveyard`、
+   下一帧末再销毁**（`RunAfterFrames(1, ...)`；不能排本帧末，因为演示 / 脚本
+   本身就在帧末任务里 push）。
+2. 列表重建同理：用户指针面板的「删」按钮，它的回调要重建列表，而
+   `ClearChildren()` 会把正在执行回调的那颗按钮一起删掉。做法一样——
+   `DetachChildrenDeferred` 摘下来、帧末销毁。
+
+**插件在 `Register` 里碰不得 `InkingWindow::Instance()`。** 那个单例第一次被调用就把
+设计尺寸烘进根锚点，而宿主是在 `registerAll()` **之后**才调 `SetDesignSize(1920,1080)`——
+提前一碰，`SetDesignSize` 被拒，宿主直接启动期硬失败（`commands` 插件实测踩到）。
+要走窗口层的东西（快捷键表、最小化、关窗），只能在 `Ready` 里做：装配之后、跑帧之前。
+
+**`ShortcutRegistry` 的表在窗口层，注册者要先死就得自己 `Unbind`。** 插件没有析构钩子
+（重载 = 重启进程），所以快捷键实际上活到进程结束——这正是"没有卸载"这条边界的
+另一面，不用处理，但别指望"插件没了快捷键还在"。
+
+**命令面板的依赖是可选的，顺序靠扫描序。** 注册命令的插件在 `Register` 里 `Use`
+`golding.commands`，所以命令面板必须先 entry。同层（都只依赖面板）的顺序 = 扫描顺序
+（目录名字典序）。反过来只是"少几条命令 + 一行 WARN"，不是崩溃——这正是"可选依赖"
+与 `requires.plugins` 的区别：后者反过来会让插件装不上。
+
+**挂在界面树上的节点不要再包一层智能指针。** `AddChild` / `AddItem` 以后节点归父级
+（`unique_ptr`），自己再存一份 `unique_ptr` 就是退出时**析构两次**——`commands` 插件的
+面板实测约 10% 的启动在退出路径上段错误（比例不定 = ASLR 把它时而藏住）。插件里
+指向树内节点一律用裸指针；"拥有"只发生在树上那一份。
 
 **路径一律用 UTF-8。** 别用 `path.string()`（MinGW 下按 "C" locale 解码，中文路径抛
 `Illegal byte sequence`），也别用 `path(std::string)`（那是 ANSI）。用 `PathFinder::toUtf8` /

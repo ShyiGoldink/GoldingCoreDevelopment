@@ -4,10 +4,10 @@
 
 | 号 | 值 | 管什么 | 不匹配 |
 | --- | --- | --- | --- |
-| `GOLDING_PLUGIN_ABI_VERSION` | 11 | 二进制布局（结构体 / 函数表顺序） | 拒绝，`state=3` |
+| `GOLDING_PLUGIN_ABI_VERSION` | 13 | 二进制布局（结构体 / 函数表顺序） | 拒绝，`state=3` |
 | `GOLDING_SDK_ID` | `"golding"` | 给哪套 SDK 编的 | 拒绝，`state=8` |
 | `GOLDING_SDK_VERSION` | `0.2.0` | CMake 的 `project(VERSION)` | 只记不拒 |
-| `GOLDING_CORE_API_VERSION` | 2 | 插件用到的最小 core 能力版本（在 `plugin.json`） | 拒绝，`state=7` |
+| `GOLDING_CORE_API_VERSION` | 4 | 插件用到的最小 core 能力版本（在 `plugin.json`） | 拒绝，`state=7` |
 
 ---
 
@@ -68,12 +68,15 @@ typedef struct GoldingPluginDescriptor
 ```c
 GoldingWidgetClass   { name, create(hostContext, parent, configName), destroy }
 GoldingPageDecl      { id, title, order, create(hostContext, parent) }
-GoldingSettingsDecl  { id, title, order, create(hostContext, parent) }
+GoldingSettingsDecl  { id, title, order, create(hostContext, parent), onActivate(hostContext) }
 GoldingRegionDecl    { id, title, order, allowDuplicateIds }
 GoldingRegionItemDecl{ regionId, id, title, icon, order, create, onActivate }
 GoldingPluginInfo    { name, title, version, role, abiVersion, state }
 GoldingOverlayDecl   { id, height, create, onClose }
 ```
+
+设置项可以是**动作**：`onActivate` 非空时，设置菜单里点这一项会直接调它、不弹内容
+面板（`create` 仍留给 `golding.settings` 的 `openSection` 那条服务路径）。
 
 `create` 的约定：把新建子树的根**挂到 `parent` 上**（由 parent 拥有），返回该根；
 返回 `nullptr` 表示失败，宿主不做清理。`destroy` 通常留空——节点随父节点销毁。
