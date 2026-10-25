@@ -295,6 +295,62 @@ const GoldingPluginInfo* hostPluginAt(void* /*context*/, int index)
     return PluginLibrary::at(index);
 }
 
+// ---- ABI v12：依赖与能力查询 ----
+//
+// 数据全在 `PluginLibrary` 里（`dependsOf` / `needsOf`），这里只是把它暴露给插件。
+// `c_str()` 全程有效：库只增不减，字符串存在 deque 里（见 `PluginLibrary` 的注释）。
+
+int hostPluginDependencyCount(void* /*context*/, int index)
+{
+    if (index < 0 || index >= PluginLibrary::count())
+    {
+        return 0;
+    }
+    return static_cast<int>(PluginLibrary::dependsOf(index).size());
+}
+
+const char* hostPluginDependencyAt(void* /*context*/, int index, int depIndex)
+{
+    if (index < 0 || index >= PluginLibrary::count() || depIndex < 0)
+    {
+        return nullptr;
+    }
+    const std::vector<std::string>& depends = PluginLibrary::dependsOf(index);
+    if (static_cast<std::size_t>(depIndex) >= depends.size())
+    {
+        return nullptr;
+    }
+    return depends[static_cast<std::size_t>(depIndex)].c_str();
+}
+
+int hostPluginNeedCount(void* /*context*/, int index)
+{
+    if (index < 0 || index >= PluginLibrary::count())
+    {
+        return 0;
+    }
+    return static_cast<int>(PluginLibrary::needsOf(index).size());
+}
+
+const char* hostPluginNeedAt(void* /*context*/, int index, int needIndex, unsigned int* outVersion)
+{
+    if (index < 0 || index >= PluginLibrary::count() || needIndex < 0)
+    {
+        return nullptr;
+    }
+    const std::vector<ManifestCapability>& needs = PluginLibrary::needsOf(index);
+    if (static_cast<std::size_t>(needIndex) >= needs.size())
+    {
+        return nullptr;
+    }
+    const ManifestCapability& need = needs[static_cast<std::size_t>(needIndex)];
+    if (outVersion != nullptr)
+    {
+        *outVersion = need.version;
+    }
+    return need.name.c_str();
+}
+
 int hostRegisterRegion(void* context, const GoldingRegionDecl* region)
 {
     const std::string provider = context != nullptr ? *static_cast<std::string*>(context) : std::string("?");
@@ -397,6 +453,10 @@ void HostApp::fillHostApi(GoldingHostApi& api, void* hostContext)
     api.uiRoot = &hostUiRoot;
     api.bootMode = &hostBootMode;
     api.pluginDir = &hostPluginDir;
+    api.pluginDependencyCount = &hostPluginDependencyCount;
+    api.pluginDependencyAt = &hostPluginDependencyAt;
+    api.pluginNeedCount = &hostPluginNeedCount;
+    api.pluginNeedAt = &hostPluginNeedAt;
 }
 
 void HostApp::setUiRoot(void* root)

@@ -41,8 +41,20 @@ extern "C" {
  * 两个导出函数都多收一个 `pluginName` 参数，因为 dll 不再自称名字。
  * **不向后兼容**，插件必须整批重编；`GoldingPluginManifest` 与
  * `GoldingCapabilityNeed` 两个类型随之删除。
+ *
+ * v12（2026-10-24）：`GoldingHostApi` 末尾追加四个**依赖与能力查询**——
+ * `pluginDependencyCount` / `pluginDependencyAt` / `pluginNeedCount` /
+ * `pluginNeedAt`。需求来自"魔法阵"那类**要画关系图**的插件：`GoldingPluginInfo`
+ * 只有身份与状态，画不出"谁依赖谁"。数据本来就在 `PluginLibrary` 里
+ * （`dependsOf` / `needsOf`），这里只是把它暴露到 C 面。
+ * **不向后兼容**，插件必须整批重编（改结构体就 +1 是这张表的规矩）。
+ *
+ * v13（2026-10-24）：`GoldingSettingsDecl` 末尾追加 `onActivate`——设置项可以
+ * **本身就是一个动作**（例如"插件图谱"点一下直接开弹窗），不再必须先弹一块
+ * 内容、再在里面放个按钮。`create` 仍保留给服务路径用。
+ * **不向后兼容**，插件必须整批重编。
  */
-#define GOLDING_PLUGIN_ABI_VERSION 11u
+#define GOLDING_PLUGIN_ABI_VERSION 13u
 
 /**
  * 这套 SDK 的标识与版本。descriptor 的 `sdkId` / `sdkVersion` 由它们填。
@@ -66,8 +78,14 @@ extern "C" {
  * 插件在 plugin.json 里声明的 `apiVersion` 是"我需要的最小能力版本"；
  * 声明高于这个数，宿主就拒绝加载——因为宿主给不了它要的能力。
  * 新能力（画布、动作表、区域等）上线时递增这个值，插件据此声明依赖。
+ *
+ * v3（2026-10-24）：依赖 / 能力查询进 C 面（`pluginDependency*` / `pluginNeed*`）。
+ * 声明 `apiVersion: 3` 的插件可以假定那四支函数指针一定非空。
+ *
+ * v4（2026-10-24）：设置项可以直接是动作（`GoldingSettingsDecl::onActivate`）。
+ * 声明 `apiVersion: 4` 的插件可以假定宿主认这个字段。
  */
-#define GOLDING_CORE_API_VERSION 2u
+#define GOLDING_CORE_API_VERSION 4u
 
 #define GOLDING_PLUGIN_DESCRIPTOR_SYMBOL "golding_plugin_descriptor"
 #define GOLDING_PLUGIN_ENTRY_SYMBOL "golding_plugin_entry"
@@ -135,6 +153,18 @@ typedef struct GoldingSettingsDecl
     const char* title;
     int order;
     GoldingWidgetHandle (*create)(void* hostContext, void* parent);
+    /**
+     * 被点中要**直接做一件事**（而不是弹一块内容）时填它。
+     *
+     * 设置菜单里点这一项：`onActivate` 非空就调它、**不**弹内容面板；空着才是
+     * 老行为（把 `create` 出来的内容放进单区块弹窗）。
+     *
+     * `create` 仍然可以填——服务路径（`golding.settings` 的 `openSection`）会用到
+     * 它，那时没有"点菜单项"这个动作。两条路都填是合法配置。
+     *
+     * ABI v13 追加（末尾插字段是这张表的规矩，插件必须整批重编）。
+     */
+    void (*onActivate)(void* hostContext);
 } GoldingSettingsDecl;
 
 /**宿主持有的一份插件档案，魔法阵这类插件靠它做可视化。*/
@@ -322,6 +352,31 @@ typedef struct GoldingHostApi
      * 插件不得释放或改写。
      */
     const char* (*pluginDir)(void* hostContext, const char* pluginName);
+
+    // ---- ABI v12：依赖与能力（给"要画关系图"的插件，比如魔法阵）----
+    //
+    // 前两个读 `plugin.json` 的 `requires.plugins`，后两个读 `needs`。
+    // 数据在**扫描阶段**就完整（`PluginLibrary`），不必等 dll 加载。
+    //
+    // `index` 一律是 `pluginAt` 那个下标——**两边必须用同一套编号**，
+    // 否则画出来的线会连错人。越界一律返回 0 / nullptr，不崩。
+
+    /**第 index 个插件依赖几个插件；越界返回 0。*/
+    int (*pluginDependencyCount)(void* hostContext, int index);
+
+    /**第 index 个插件的第 depIndex 个依赖**名字**；越界返回 nullptr。*/
+    const char* (*pluginDependencyAt)(void* hostContext, int index, int depIndex);
+
+    /**第 index 个插件需要几个能力（`needs` 的条数）；越界返回 0。*/
+    int (*pluginNeedCount)(void* hostContext, int index);
+
+    /**
+     * 第 index 个插件的第 needIndex 个能力**名字**；越界返回 nullptr。
+     *
+     * `outVersion` 非空时写入最小版本（0 = 不关心版本）。
+     * 名字指针由宿主持有、活到进程结束，插件不得释放或改写。
+     */
+    const char* (*pluginNeedAt)(void* hostContext, int index, int needIndex, unsigned int* outVersion);
 } GoldingHostApi;
 
 /**

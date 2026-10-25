@@ -1,3 +1,4 @@
+#include "GoldingCommands.h"
 #include "GoldingMenu.h"
 #include "GoldingServices.h"
 #include "GoldingSettings.h"
@@ -153,41 +154,9 @@ GoldingWidgetHandle createSettingsPanel(void* /*hostContext*/, void* parent)
         panel->AddChild(std::make_unique<inking::InkingStaticLabel>(panel, empty));
     }
 
-    // ---- 关闭按钮 ----
-    //
-    // 挂在**弹窗本身**上（不是那个 Stack 容器里）并按绝对坐标贴右下。
-    // 不用"弹簧 + 按钮"那套：实测求解器给 `fillMain` 分剩余空间时**不为它后面的项预留**，
-    // 于是按钮会被挤出容器、只剩一条边（和 MenuBar 弹簧把窗口按钮顶出画布是同一个根因）。
-    inking::ButtonData close;
-    close.name = "settings.close";
-    close.width = 120;
-    close.height = 36;
-    close.normal.type = inking::AppearanceType::Color;
-    close.normal.color = theme::kSurfaceSunken;
-    close.normal.themeColor = "clipSurface";
-    close.hover.type = inking::AppearanceType::Color;
-    close.hover.color = theme::kHoverNeutral;
-    close.onclicked.type = inking::AppearanceType::Color;
-    close.onclicked.color = theme::kAccentSoft;
-    close.hoverInheritsNormal = false;
-    close.onclickedInheritsNormal = false;
-    close.label = "关闭";
-    close.textColor = theme::kTextPrimary;
-    close.text.fontSize = 15.0f;
-    close.text.align = inking::TextAlignH::Center;
-    close.text.alignV = inking::TextAlignV::Middle;
-    close.shape = inking::ShapeSpec::RoundedRect(8.0f);
-    close.offsetX = static_cast<float>(popup->GetWidth() - 120 - 24);
-    close.offsetY = static_cast<float>(popup->GetHeight() - 36 - 24);
-    close.zIndex = 1; // 后加 + 显式压一层，保证在内容面板之上
-    auto* closeButton = static_cast<inking::InkingStaticButton*>(
-        popup->AddChild(std::make_unique<inking::InkingStaticButton>(popup, close)));
-    closeButton->SetOnClicked([] {
-        if (g_popup != nullptr)
-        {
-            g_popup->pop(nullptr);
-        }
-    });
+    // 关闭键由弹窗统一提供（右上角的 X，`golding.popup` v2），这里不再画一个：
+    // 内容与关闭键分开是那条契约的核心，插件重复画会出现"两个关闭控件"。
+    // 因此底部也不必再给按钮留位置，内容可以吃满整块。
 
     std::printf("[settings] 设置面板：%d 个区块，挂上 %d 个\n", count, mounted);
     return panel;
@@ -212,12 +181,31 @@ void pushSettingsPopup(const golding::GoldingPopupDecl* decl)
     }
 }
 
-/** 菜单项被点：只弹那一个区块。 */
-void onSettingsItem(void* /*hostContext*/, const char* itemId)
+/**
+ * 菜单项被点：动作型区块自己就是入口，否则弹那一个区块的内容。
+ *
+ * "动作型"是 ABI v13 的 `GoldingSettingsDecl::onActivate`：例如「插件图谱」点一下
+ * 就该直接把法阵图弹出来，而不是先弹一块只放着一个按钮的框。
+ */
+void onSettingsItem(void* hostContext, const char* itemId)
 {
     if (itemId == nullptr || itemId[0] == '\0')
     {
         return;
+    }
+    const std::string wanted = itemId;
+    for (int index = 0; index < g_host.SettingsSectionCount(); ++index)
+    {
+        const GoldingSettingsDecl* section = g_host.SettingsSectionAt(index);
+        if (section != nullptr && section->id != nullptr && wanted == section->id)
+        {
+            if (section->onActivate != nullptr)
+            {
+                section->onActivate(hostContext);
+                return;
+            }
+            break;
+        }
     }
     g_onlySectionId = itemId;
     pushSettingsPopup(&kSettingsPopupOne);
@@ -322,6 +310,36 @@ const golding::SettingsService kSettingsService{
     &settingsOpenMenuAt,
 };
 
+// ---- 命令面板（`golding.commands`）：把「打开设置」也挂进去 ----
+//
+// **不写 `needs`**：命令面板不在时本插件照常工作，只是少一条命令。`plugin.json`
+// 里也不加 `requires` —— 否则"没有命令面板就装不上设置"。
+
+/**`openAll` 是服务里那个 C 函数（签名 `int(void*)`），这里要 `void(void*)`。 */
+void onCommandOpen(void* /*hostContext*/) { settingsOpenAll(nullptr); }
+
+const golding::CommandDecl kCommandOpen{
+    "settings.open",
+    "打开设置",
+    "settings shezhi config",
+    &onCommandOpen,
+};
+
+void RegisterCommand(const golding::Host& host)
+{
+    const golding::CommandService* commands =
+        host.Use<golding::CommandService>(golding::kCommandsServiceName, golding::kCommandsServiceVersion);
+    if (commands == nullptr)
+    {
+        host.Warn("没有 golding.commands（命令面板缺席），settings.open 不注册");
+        return;
+    }
+    if (commands->add(nullptr, &kCommandOpen) != 0)
+    {
+        host.Warn("settings.open 命令注册被驳回（id 已占用？）");
+    }
+}
+
 const GoldingRegionItemDecl kMenuEntry = {
     "menubar",       // 区域：面板插件自己定的约定
     "settings.entry", // 区域内唯一 id
@@ -340,7 +358,7 @@ public:
         g_host = host;
 
         // 服务在这里取一次：它由面板插件提供，而 `requires.plugins` 保证了面板先 entry。
-        g_popup = host.Use<golding::PopupService>(golding::kPopupServiceName, 1);
+        g_popup = host.Use<golding::PopupService>(golding::kPopupServiceName, golding::kPopupServiceVersion);
         if (g_popup == nullptr)
         {
             // 不算失败：没有面板就没有设置入口，这是"面板缺席"的合法降级。
@@ -362,6 +380,7 @@ public:
         {
             host.Warn("golding.settings 服务注册失败（同名已被占用？）");
         }
+        RegisterCommand(host);
         return host.AddRegionItem(kMenuEntry) && ok;
     }
 };

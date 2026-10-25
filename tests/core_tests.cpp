@@ -232,7 +232,7 @@ void checkRegistryStats()
 
     // ---- 设置表：同一套语义，独立的计数 ----
     SettingsRegistry::clear();
-    const GoldingSettingsDecl section{"probe.section", "探针区块", 10, noopCreate};
+    const GoldingSettingsDecl section{"probe.section", "探针区块", 10, noopCreate, nullptr};
     SettingsRegistry::registerSection(&section, "probe");
     SettingsRegistry::registerSection(&section, "probe");
     check(SettingsRegistry::stats().accepted == 1 && SettingsRegistry::stats().rejected == 1, "设置表：1 接受 / 1 驳回",

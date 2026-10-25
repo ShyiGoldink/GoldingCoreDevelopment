@@ -236,6 +236,55 @@ public:
         return _api->pluginAt(_api->hostContext, index);
     }
 
+    // ---- 依赖与能力（ABI v12）：给"要画关系图"的插件 ----
+    //
+    // `index` 与 `PluginAt` 是**同一套编号**。返回的字符串归宿主所有、活到进程结束。
+    // 数据来自 `plugin.json`，所以**加载失败的插件也查得到依赖**——那正是诊断
+    // "它为什么装不上"时最需要的信息。
+
+    /**第 index 个插件依赖几个插件；越界返回 0。*/
+    int PluginDependencyCount(int index) const
+    {
+        if (_api == nullptr || _api->pluginDependencyCount == nullptr)
+        {
+            return 0;
+        }
+        return _api->pluginDependencyCount(_api->hostContext, index);
+    }
+
+    /**第 index 个插件的第 depIndex 个依赖名；越界返回 nullptr。*/
+    const char* PluginDependencyAt(int index, int depIndex) const
+    {
+        if (_api == nullptr || _api->pluginDependencyAt == nullptr)
+        {
+            return nullptr;
+        }
+        return _api->pluginDependencyAt(_api->hostContext, index, depIndex);
+    }
+
+    /**第 index 个插件需要几个能力；越界返回 0。*/
+    int PluginNeedCount(int index) const
+    {
+        if (_api == nullptr || _api->pluginNeedCount == nullptr)
+        {
+            return 0;
+        }
+        return _api->pluginNeedCount(_api->hostContext, index);
+    }
+
+    /**
+     * 第 index 个插件的第 needIndex 个能力名；越界返回 nullptr。
+     * `outVersion` 非空时写最小版本（0 = 不关心版本）。
+     */
+    const char* PluginNeedAt(int index, int needIndex, unsigned int* outVersion = nullptr) const
+    {
+        if (_api == nullptr || _api->pluginNeedAt == nullptr)
+        {
+            return nullptr;
+        }
+        return _api->pluginNeedAt(_api->hostContext, index, needIndex, outVersion);
+    }
+
     // ---- 装配后（ABI v8 的两条只读通道）----
 
     /**
