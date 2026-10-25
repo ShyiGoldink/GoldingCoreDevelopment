@@ -8,7 +8,9 @@
 #include <config/window_config.h>
 #include <dataStruct/InkingAnchorData.h>
 #include <dataStruct/InkingDecoration.h>
+#include <dataStruct/InkingEasing.h>
 #include <dataStruct/InkingTextLayout.h>
+#include <input/Shortcut.h>
 #include <panel/InkingFixedPopup.h>
 #include <panel/InkingStaticPanel.h>
 #include <prefab/MenuBar.h>
@@ -22,8 +24,10 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,8 +67,16 @@ using inking::PanelData;
 constexpr int kBarHeight = 44;
 /** 侧栏宽度。固定，不做折叠——折叠要先定义"哪些项在折叠态还看得见"，那是产品问题。 */
 constexpr int kSidebarWidth = 220;
+/** 抽屉滑一次的时长（秒）。160ms：看得出是"滑进去的"，又不至于让人等。 */
+constexpr float kSidebarAnimSeconds = 0.16f;
 /** 扫页面表的上限，纯粹防呆。 */
 constexpr int kPageScanLimit = 64;
+
+/** 宽度取整：`Resize` 只收整数，而动画中间值必须是浮点（按整数累加会走形）。 */
+int roundToPixel(float value)
+{
+    return static_cast<int>(value >= 0.0f ? value + 0.5f : value - 0.5f);
+}
 
 /**
  * @brief 侧栏那一条：**必须是动态档**。
@@ -76,11 +88,140 @@ constexpr int kPageScanLimit = 64;
  * 两条纪律（老 shell 踩过，写在这里免得下一个人重踩）：
  *  - **不要**声明 `OwnsSubtreeHit()`：声明之后子孙不进命中表，侧栏条目点不到；
  *  - `HitTest` 要自己答"点在不在我这块矩形上"，否则这块容器在命中上是个透明洞。
+ *
+ * 宽度就是全部状态：展开 = `kSidebarWidth`、收起 = 0，中间值由动画算。**不再**
+ * `SetVisible(false)`——宽度 0 已经不画也不命中，而一隐藏它就从绘制列表里消失，
+ * 自己再也收不到 Tick，展开动画根本没法从 0 起步。
  */
 class SideLayer final : public inking::InkingDynamicWidget
 {
 public:
     SideLayer(inking::InkingWidget* parent, const inking::AnchorData& data, std::uint32_t color)
+        : inking::InkingDynamicWidget(parent, data), _color(color), _width(static_cast<float>(data.width))
+    {
+        _from = _width;
+        _to = _width;
+    }
+
+    bool HitTest(float worldX, float worldY) const override
+    {
+        const float x = GetAbsX();
+        const float y = GetAbsY();
+        return worldX >= x && worldX < x + static_cast<float>(GetWidth()) && worldY >= y &&
+               worldY < y + static_cast<float>(GetHeight());
+    }
+
+    /** 抽屉里的一切都剪在自己这一块之内：动画中途条目不许溢到内容区上。 */
+    bool HasSubtreeClip() const noexcept override { return true; }
+
+    /**
+     * 往 `targetWidth` 滑过去（从**当前**宽度起算）。
+     *
+     * 目标跟"正在去的目标"相同就什么都不做——连点两下不该把动画重置成"从头滑"。
+     * 中途反向（展开途中又点收起）则由新目标重新起一段，起点就是当下宽度。
+     */
+    void AnimateTo(float targetWidth)
+    {
+        if (targetWidth < 0.0f)
+        {
+            targetWidth = 0.0f;
+        }
+        if (targetWidth == _to)
+        {
+            return;
+        }
+        _from = _width;
+        _to = targetWidth;
+        _elapsed = 0.0f;
+        _animating = true;
+    }
+
+    /** 不走动画，直接落到 `targetWidth`（装配期定初始形态用）。 */
+    void SnapTo(float targetWidth)
+    {
+        if (targetWidth < 0.0f)
+        {
+            targetWidth = 0.0f;
+        }
+        _width = targetWidth;
+        _from = targetWidth;
+        _to = targetWidth;
+        _elapsed = kSidebarAnimSeconds;
+        _animating = false;
+        Resize(roundToPixel(targetWidth), GetHeight());
+    }
+
+    /**
+     * 推进一步。@return 宽度这一步真的变了（调用方要据此重排父级）。
+     *
+     * 时间是从**外部**喂进来的（`BodyLayer::onTick` 的固定逻辑步），本类不自己
+     * 记时钟：组件里存一个"动画起点"再按墙钟算，会在暂停 / 切场景后突然跳一大段。
+     */
+    bool AdvanceAnimation(float deltaSeconds)
+    {
+        if (!_animating)
+        {
+            return false;
+        }
+        if (deltaSeconds > 0.0f)
+        {
+            _elapsed += deltaSeconds;
+        }
+        float progress = _elapsed / kSidebarAnimSeconds;
+        if (progress >= 1.0f)
+        {
+            progress = 1.0f;
+        }
+        // 缓动只改进度：`EaseOut` 让抽屉"窜出来、再稳住"，收起时同样先快后慢。
+        const float eased = inking::ApplyEasing(inking::Easing::EaseOut, progress);
+        _width = progress >= 1.0f ? _to : _from + (_to - _from) * eased;
+        if (progress >= 1.0f)
+        {
+            _animating = false;
+        }
+        Resize(roundToPixel(_width), GetHeight());
+        return true;
+    }
+
+    /** 现在展开到多宽（可能落在动画中间）。自检与观测口。 */
+    float CurrentWidth() const noexcept { return _width; }
+
+    /** 还在滑吗。 */
+    bool IsAnimating() const noexcept { return _animating; }
+
+protected:
+    void onRender(float pixelX, float pixelY) const override
+    {
+        const float magnification = GetMagnification() > 0.0f ? GetMagnification() : 1.0f;
+        inking::detail::fillShape(inking::detail::currentRenderer(), inking::ShapeSpec::Rect(), GetWidth(),
+                                  GetHeight(), magnification, pixelX, pixelY, inking::TransformSpec{}, _color);
+    }
+
+private:
+    std::uint32_t _color = 0xFFFFFFFFu;
+    /** 当前宽度（浮点）。几何取整交给 `roundToPixel`，这里保留精度。 */
+    float _width = 0.0f;
+    float _from = 0.0f;
+    float _to = 0.0f;
+    float _elapsed = 0.0f;
+    bool _animating = false;
+};
+
+/**
+ * @brief 顶栏以下的那一条：白底 + 横向 Stack（侧栏 | 内容区），**动态档**。
+ *
+ * 为什么非得是动态档：顶栏进出全屏时"它占多高"在 `kBarHeight` 与 0 之间跳，
+ * **全屏下浏览器条消失那一刻，body 的 y 与高必须一起改**——而 `MenuBar` 是静态
+ * 面板（`GetCurrentHeight()` 只回答"现在画面上还剩多少"，自己改不了尺寸），
+ * 布局求解器又不跳过不可见项，所以只能让 body 自己按探测到的顶栏高度重摆。
+ *
+ * 它顺带当侧栏抽屉动画的**节拍器**：本类永远有宽有高，一定在绘制列表里，
+ * 而收起后的侧栏宽度是 0，靠它自己收不到动态档的 Tick。
+ */
+class BodyLayer final : public inking::InkingDynamicWidget
+{
+public:
+    BodyLayer(inking::InkingWidget* parent, const inking::AnchorData& data, std::uint32_t color)
         : inking::InkingDynamicWidget(parent, data), _color(color)
     {
     }
@@ -93,7 +234,72 @@ public:
                worldY < y + static_cast<float>(GetHeight());
     }
 
+    void SetSidebar(SideLayer* sidebar) noexcept { _sidebar = sidebar; }
+
+    /**
+     * 顶栏现在占多高（`-1` = 问不出来，这帧别动）。
+     *
+     * 用回调而不是存 `MenuBar*`：顶栏与主体是同一次装配里造出来的兄弟，谁先建
+     * 谁后建不该影响这里；回调由装配方在两边都齐了之后才装上。
+     */
+    void SetBarHeightProbe(std::function<int()> probe) { _probe = std::move(probe); }
+
+    /** 贴到顶栏下面，高度吃掉剩下的整块，再重排（内容区自动跟着长）。 */
+    void FollowBarHeight(int barHeight)
+    {
+        if (barHeight < 0)
+        {
+            return;
+        }
+        inking::InkingWidget* parent = GetParent();
+        if (parent == nullptr)
+        {
+            return;
+        }
+        ChangeOffset(0.0f, static_cast<float>(barHeight));
+        Resize(parent->GetWidth(), parent->GetHeight() - barHeight);
+        Relayout();
+    }
+
+    /**
+     * 每拍开头调一次：清"上一帧摘下来的旧节点"。
+     *
+     * 由装配方装上（见 `createShell`）。**不用 `RunAfterFrames`**：那条路在
+     * `--frames`（CI / 截图）模式下根本不派发，节点会一直躺在 graveyard 里，
+     * 直到进程退出时随静态 `g_parts` 一起析构——而那时场景已经销毁，
+     * `~InkingWidget` 里的 `RemoveDrawNode` 就是一次 use-after-free
+     * （实测：退出码 0xC0000005）。
+     */
+    void SetDeferredSweep(std::function<void()> sweep) { _sweep = std::move(sweep); }
+
+    /** 上一次摆过的顶栏高度（`-2` = 还没摆过，任何 >= 0 的值都会触发第一次）。 */
+    int LastBarHeight() const noexcept { return _lastBarHeight; }
+
 protected:
+    void onTick(float deltaSeconds) override
+    {
+        // 先清上一拍摘下来的旧节点（弹窗 / 重建的条目）。此时一定不在任何点击
+        // 回调栈上，销毁它们是安全的。
+        if (_sweep)
+        {
+            _sweep();
+        }
+        if (_probe)
+        {
+            const int barHeight = _probe();
+            if (barHeight >= 0 && barHeight != _lastBarHeight)
+            {
+                _lastBarHeight = barHeight;
+                FollowBarHeight(barHeight);
+            }
+        }
+        if (_sidebar != nullptr && _sidebar->AdvanceAnimation(deltaSeconds))
+        {
+            // 侧栏宽度变了 → 横向 Stack 要重算内容区（`fillMain` 吃剩余宽度）。
+            Relayout();
+        }
+    }
+
     void onRender(float pixelX, float pixelY) const override
     {
         const float magnification = GetMagnification() > 0.0f ? GetMagnification() : 1.0f;
@@ -103,6 +309,11 @@ protected:
 
 private:
     std::uint32_t _color = 0xFFFFFFFFu;
+    SideLayer* _sidebar = nullptr;
+    std::function<int()> _probe{};
+    /** 清 graveyard 的钩子（由装配方装上，见 `SetDeferredSweep`）。 */
+    std::function<void()> _sweep{};
+    int _lastBarHeight = -2;
 };
 
 /**
@@ -120,11 +331,11 @@ struct ShellParts
     void* hostContext = nullptr;
     InkingStaticPanel* root = nullptr;
     inking::prefab::MenuBar* bar = nullptr;
-    /** 顶栏以下的那一条：横向排「侧栏 + 内容区」。 */
-    InkingStaticPanel* body = nullptr;
+    /** 顶栏以下的那一条：横向排「侧栏 + 内容区」（动态档，见 `BodyLayer`）。 */
+    BodyLayer* body = nullptr;
     SideLayer* sidebar = nullptr;
     InkingStaticPanel* content = nullptr;
-    /** 侧栏现在是展开的吗。收起 = 隐藏 + 让主体重排（内容区自动吃满）。 */
+    /** 侧栏现在是展开的吗。收起 = 宽度归 0（动画走完），内容区自动吃满。 */
     bool sidebarVisible = true;
     /** 内容区当前挂着的那一页；没有页面时是 nullptr。 */
     inking::InkingWidget* currentPage = nullptr;
@@ -132,8 +343,27 @@ struct ShellParts
     InkingStaticButton* backdrop = nullptr;
     /** 当前那块弹窗内容；每 push 一次重建一次（静态面板不能改尺寸）。 */
     InkingStaticPanel* popup = nullptr;
-    const golding::GoldingPopupDecl* popupDecl = nullptr;
+    /**
+     * 当前弹窗的声明——**值拷贝**，不是调用方给的指针。
+     *
+     * 契约只保证"声明在 `push` 调用期间有效"（`GoldingPopupDecl` 头文件里那条），
+     * 而调用方在自己函数里写 `const GoldingPopupDecl decl{...}` 是最自然的写法。
+     * 存指针的话，`pop` 那一刻读到的就是那个栈帧被覆盖之后的内存：关闭弹窗时
+     * "随机"闪退，且崩在 `onClose` 上，看起来像面板的错（实测过）。
+     */
+    std::optional<golding::GoldingPopupDecl> popupDecl{};
+    /** `popupDecl->id` 指向的文本：指向调用方栈上的字符串同样会悬空。 */
+    std::string popupDeclId{};
     bool popupOpen = false;
+    /**
+     * 一帧内摘下来、**还没销毁**的旧节点。
+     *
+     * `push` 可能在某个按钮的点击回调栈上被调用（设置里的「用户指针…」就是这样：
+     * 点它要求面板换成另一块弹窗）。当场销毁旧弹窗 = 把那个正在执行回调的按钮
+     * 一起删掉，回调返回后就是 use-after-free。所以先摘下来，帧末（输入派发
+     * 结束、这一帧也画完之后）再销毁。
+     */
+    std::vector<std::unique_ptr<inking::InkingWidget>> graveyard{};
     /**
      * 顶栏区域项 id → 它自己那个节点。
      *
@@ -722,19 +952,46 @@ inking::InkingWidget* placeRegionItem(const GoldingRegionItemDecl* item, inking:
     return button;
 }
 
-/** 把侧栏的展开/收起落到几何上：改宽度 → 主体重排（内容区的 `fillMain` 自动跟着变）。 */
+/**
+ * 把侧栏的展开/收起落到几何上：**走抽屉动画**。
+ *
+ * 只设目标宽度，谁也别在这里 `Resize` 到终值——每帧的推进由 `BodyLayer::onTick`
+ * 驱动（它是动态档、永远在绘制列表里）。立刻改宽度会得到"瞬间跳一下"，而
+ * 立刻重排父级则会在第一帧就把内容区摆到终态，动画看起来像被截了一半。
+ */
 void applySidebarState(const std::shared_ptr<ShellParts>& parts)
 {
     if (!parts || parts->sidebar == nullptr)
     {
         return;
     }
-    parts->sidebar->Resize(parts->sidebarVisible ? kSidebarWidth : 0, parts->sidebar->GetHeight());
-    parts->sidebar->SetVisible(parts->sidebarVisible);
+    parts->sidebar->AnimateTo(parts->sidebarVisible ? static_cast<float>(kSidebarWidth) : 0.0f);
+}
+
+/** 装配期用的直落版：不走动画，免得首帧看到"正在划入"的中间态。 */
+void snapSidebarState(const std::shared_ptr<ShellParts>& parts)
+{
+    if (!parts || parts->sidebar == nullptr)
+    {
+        return;
+    }
+    parts->sidebar->SnapTo(parts->sidebarVisible ? static_cast<float>(kSidebarWidth) : 0.0f);
     if (parts->body != nullptr)
     {
         parts->body->Relayout();
     }
+}
+
+/** 侧栏开合（`≡` 与 Tab 共用一个落点，免得两处各写一遍状态机）。 */
+void toggleSidebar(const std::shared_ptr<ShellParts>& parts)
+{
+    if (!parts)
+    {
+        return;
+    }
+    parts->sidebarVisible = !parts->sidebarVisible;
+    applySidebarState(parts);
+    std::printf("[shell] 侧栏%s\n", parts->sidebarVisible ? "展开" : "收起");
 }
 
 /** 把内容区换成 `pageId` 那一页；没有这一页时返回 false 并保持原样。 */
@@ -771,6 +1028,23 @@ const golding::NavigationService kNavigationService{GOLDING_PLUGIN_ABI_VERSION, 
 
 // ---- 弹窗服务 ----
 
+/**
+ * @brief 把摘下来的旧节点排到**下一拍**销毁（真正的清理在 `BodyLayer::onTick` 开头）。
+ *
+ * 为什么不是立刻销毁：`push` 可能是在某个按钮的点击回调里被调的（设置里的
+ * 「用户指针…」就是），那个按钮就在旧弹窗里。当场删掉它，它的 `TriggerClick`
+ * 返回后还会碰自己的成员——use-after-free，实测段错误。
+ *
+ * 为什么不用 `RunAfterFrames(1)`：那条路在 `--frames`（CI / 截图）路径上不派发，
+ * 节点会一直躺在 graveyard 里，直到进程退出时随静态 `g_parts` 一起析构——而那时
+ * 场景已经销毁，`~InkingWidget` 里的 `RemoveDrawNode` 就是一次 use-after-free
+ * （实测退出码 0xC0000005）。改由逻辑步每拍清，两个模式走同一条路。
+ */
+void ScheduleGraveyardSweep()
+{
+    // 语义占位：清理点在 `BodyLayer::onTick`。
+}
+
 void closePopup()
 {
     if (!g_parts || !g_parts->popupOpen)
@@ -789,11 +1063,27 @@ void closePopup()
     }
 
     // 先摘声明再回调：`onClose` 里再 push 一次是合法用法，不该被这里清掉。
-    const golding::GoldingPopupDecl* decl = parts.popupDecl;
-    parts.popupDecl = nullptr;
-    if (decl != nullptr && decl->onClose != nullptr)
+    //
+    // 从这里往下用的是**自己那份拷贝**：声明只承诺在 `push` 期间有效，调用方
+    // 常常在栈上写 `const GoldingPopupDecl decl{...}`——存下来的指针到这一刻
+    // 早已失效（关闭弹窗时随机闪退的根因）。
+    const bool hadDecl = parts.popupDecl.has_value();
+    golding::GoldingPopupDecl decl{};
+    std::string idText;
+    if (hadDecl)
     {
-        decl->onClose(nullptr);
+        decl = *parts.popupDecl;
+        if (decl.id != nullptr)
+        {
+            idText = decl.id;
+            decl.id = idText.c_str();
+        }
+    }
+    parts.popupDecl.reset();
+    parts.popupDeclId.clear();
+    if (hadDecl && decl.onClose != nullptr)
+    {
+        decl.onClose(nullptr);
     }
 }
 
@@ -813,10 +1103,20 @@ int popupPush(void* /*self*/, const golding::GoldingPopupDecl* decl)
     // 而不是留一块常驻再 Resize。push 是低频动作（弹对话框），重建的代价可以忽略。
     if (parts.popup != nullptr)
     {
-        parts.root->RemoveChild(parts.popup);
+        // 只摘不删：这一行可能在某个按钮的回调栈上（见 `graveyard` 的注释）。
+        if (auto removed = parts.root->RemoveChild(parts.popup))
+        {
+            parts.graveyard.push_back(std::move(removed));
+            ScheduleGraveyardSweep();
+        }
         parts.popup = nullptr;
     }
-    parts.popupDecl = decl;
+
+    // 声明**深拷贝**：id 文本一起拷。调用方可以在栈上写声明，push 返回后就能扔。
+    parts.popupDeclId = decl->id != nullptr ? decl->id : "";
+    golding::GoldingPopupDecl copy = *decl;
+    copy.id = parts.popupDeclId.c_str();
+    parts.popupDecl = copy;
 
     // 内容区的矩形要**两级相加**：`content` 是 `body` 的孩子，`GetX/GetY` 是相对父级的。
     const int areaX = static_cast<int>(parts.body->GetX() + parts.content->GetX());
@@ -840,14 +1140,54 @@ int popupPush(void* /*self*/, const golding::GoldingPopupDecl* decl)
 
     parts.popup = static_cast<InkingStaticPanel*>(
         parts.root->AddChild(std::make_unique<InkingStaticPanel>(parts.root, data)));
+    if (parts.popup == nullptr)
+    {
+        parts.popupDecl.reset();
+        parts.popupDeclId.clear();
+        return 1;
+    }
 
+    // ---- 内容容器 ----
+    //
+    // 插件的所有节点都往它上面挂（`GoldingPopupDecl::create` 收到的 parent 就是它）。
+    // 与弹窗同尺寸、同圆角：它是白底，直角铺满会把弹窗的四角顶成方角。
+    PanelData contentData = makePanel("popup.content", width, height, theme::kSurface, "panelSurface");
+    contentData.shape = inking::ShapeSpec::RoundedRect(16.0f);
+    contentData.clipChildren = true;
+    auto* content = static_cast<InkingStaticPanel*>(
+        parts.popup->AddChild(std::make_unique<InkingStaticPanel>(parts.popup, contentData)));
+
+    // ---- 关闭键（X）----
+    //
+    // 由面板统一提供：内容与关闭键必须分开，否则插件重建自己的内容时会连它一起删掉。
+    // 内容铺满整块，所以 X 要显式压一层（zIndex + 后加）——右上角那一小块归它。
+    if (content != nullptr)
+    {
+        ButtonData closeData = makeBarButton("popup.close", 36);
+        closeData.height = 36;
+        closeData.label = "×";
+        closeData.text.fontSize = 20.0f;
+        closeData.shape = inking::ShapeSpec::RoundedRect(8.0f);
+        closeData.offsetX = static_cast<float>(width - 36 - 12);
+        closeData.offsetY = 12.0f;
+        closeData.zIndex = 10;
+        auto* closeButton = static_cast<InkingStaticButton*>(
+            parts.popup->AddChild(std::make_unique<InkingStaticButton>(parts.popup, closeData)));
+        if (closeButton != nullptr)
+        {
+            closeButton->SetOnClicked([] { closePopup(); });
+        }
+    }
+
+    // 内容建不出来 = 整个弹窗算失败（半成品不如不给）。
     // hostContext 传 nullptr：调用方是在自己的代码里发起的，需要 HostApi 的话
     // 应当把自己那份 `golding::Host` 存下来（见 `GoldingPopupDecl::create` 的注释）。
-    if (decl->create(nullptr, parts.popup) == nullptr)
+    if (content == nullptr || decl->create(nullptr, content) == nullptr)
     {
         parts.root->RemoveChild(parts.popup);
         parts.popup = nullptr;
-        parts.popupDecl = nullptr;
+        parts.popupDecl.reset();
+        parts.popupDeclId.clear();
         g_host.Warn((std::string("弹窗内容创建失败：") + (decl->id != nullptr ? decl->id : "(无名)")).c_str());
         return 1;
     }
@@ -863,7 +1203,7 @@ void popupPop(void* /*self*/)
     closePopup();
 }
 
-const golding::PopupService kPopupService{GOLDING_PLUGIN_ABI_VERSION, &popupPush, &popupPop};
+const golding::PopupService kPopupService{golding::kPopupServiceVersion, &popupPush, &popupPop};
 
 // ---- 骨架 ----
 
@@ -924,16 +1264,30 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
 
     // ---- 抽屉开关（≡）：顶栏最左 ----
     //
-    // 收拉**不改尺寸**（静态面板几何构造即定型），而是"隐藏侧栏 + 让主体重排"：
-    // 侧栏在横向 Stack 里，隐藏之后不再占位，内容区的 `fillMain` 自动吃满。
+    // 收拉**不改尺寸**（静态面板几何构造即定型），而是"改侧栏宽度 + 让主体重排"：
+    // 侧栏在横向 Stack 里，宽度归 0 之后不再占位，内容区的 `fillMain` 自动吃满。
     // 这样收起/展开都不重建任何节点，页面与输入状态原样保留。
     ButtonData toggleLook = makeBarButton("GoldingGamestoryShell.toggle", 40);
     toggleLook.text.fontSize = 18.0f; // ≡ 小字号下几乎看不清
-    parts->bar->AddButton(toggleLook, "≡", [parts] {
-        parts->sidebarVisible = !parts->sidebarVisible;
-        applySidebarState(parts);
-        std::printf("[shell] 侧栏%s\n", parts->sidebarVisible ? "展开" : "收起");
-    });
+    parts->bar->AddButton(toggleLook, "≡", [parts] { toggleSidebar(parts); });
+
+    // ---- 侧栏的第二个入口：全局 Tab ----
+    //
+    // 绑在**窗口的快捷键表**上（`MenuBar::BindShortcut`），不是焦点派发：焦点在
+    // 输入框里也照样响应。代价说在明处——全局键会**先消费掉**这一下 Tab，输入框
+    // 因此拿不到 Tab（想给输入框留 Tab 就得换成 Ctrl+Tab 之类）。
+    {
+        bool parsed = false;
+        const inking::Shortcut sidebarShortcut = inking::Shortcut::Parse("Tab", &parsed);
+        const std::uint64_t bound =
+            parsed ? parts->bar->BindShortcut(sidebarShortcut, [parts] { toggleSidebar(parts); }, "侧栏开合")
+                   : 0;
+        if (bound == 0)
+        {
+            // 绑定失败会表现成"按 Tab 没反应"，所以不能只在返回值里静默。
+            g_host.Warn("侧栏快捷键 Tab 没绑上（组合被占或解析失败）");
+        }
+    }
 
     // 面板自己的名字：顶栏左侧。它是这块面板的身份，不是业务内容。
     inking::LabelData titleData;
@@ -971,16 +1325,26 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
 
     // ---- 主体：横向排「侧栏 + 内容区」----
     //
-    // 为什么要有这一层：收拉侧栏靠"隐藏 + 重排"，而"剩下的宽度归内容区"必须有一个
-    // 横向布局的父级来算。挂根上做不到——根不排布（见上）。
-    PanelData bodyData = makePanel("GoldingGamestoryShell.body", width, height - barHeight, theme::kSurface,
-                                   "panelSurface");
-    bodyData.offsetY = static_cast<float>(barHeight);
-    bodyData.layout.kind = inking::LayoutKind::Stack;
-    bodyData.layout.axis = inking::LayoutAxis::Horizontal;
-    bodyData.layout.gap = 0.0f;
-    parts->body = static_cast<InkingStaticPanel*>(
-        parts->root->AddChild(std::make_unique<InkingStaticPanel>(parts->root, bodyData)));
+    // 为什么要有这一层：侧栏宽度归 0 时"剩下的宽度归内容区"必须有一个横向布局的
+    // 父级来算。挂根上做不到——根不排布（见上）。
+    //
+    // **必须是动态档**（`BodyLayer`）：顶栏进出全屏时它占的高度在 `kBarHeight` 与 0
+    // 之间跳，body 的 y / 高都得跟着改。静态面板改不了自己的几何，那正是"全屏后
+    // 顶上留一条 44px 空白、内容不往上长"的来源。
+    inking::AnchorData bodyAnchor;
+    bodyAnchor.width = width;
+    bodyAnchor.height = height - barHeight;
+    bodyAnchor.offsetY = static_cast<float>(barHeight);
+    bodyAnchor.color = theme::kSurface;
+    bodyAnchor.layout.kind = inking::LayoutKind::Stack;
+    bodyAnchor.layout.axis = inking::LayoutAxis::Horizontal;
+    bodyAnchor.layout.gap = 0.0f;
+    parts->body = static_cast<BodyLayer*>(
+        parts->root->AddChild(std::make_unique<BodyLayer>(parts->root, bodyAnchor, theme::kSurface)));
+    if (parts->body != nullptr)
+    {
+        parts->body->SetName("GoldingGamestoryShell.body");
+    }
 
     // ---- 左侧栏（区域 sidebar）----
     //
@@ -996,6 +1360,28 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
     parts->sidebar = static_cast<SideLayer*>(
         parts->body->AddChild(std::make_unique<SideLayer>(parts->body, sidebarAnchor, theme::kSurfaceSunken)));
     parts->sidebar->SetName("GoldingGamestoryShell.sidebar");
+
+    // 主体接管两件每帧的活：跟住顶栏当前高度、推进侧栏抽屉动画。
+    if (parts->sidebar != nullptr)
+    {
+        parts->body->SetSidebar(parts->sidebar);
+        // 探测用 `weak_ptr` 捕获：body 由 root 拥有、root 由场景拥有，而 `g_parts`
+        // 可能比它们活得久。强引用会成环（parts → body → lambda → parts），
+        // 裸指针会在场景先析构时悬垂；weak 两头都不占。
+        std::weak_ptr<ShellParts> weakParts = parts;
+        parts->body->SetBarHeightProbe([weakParts]() -> int {
+            const std::shared_ptr<ShellParts> locked = weakParts.lock();
+            return locked != nullptr && locked->bar != nullptr ? locked->bar->GetCurrentHeight() : -1;
+        });
+        // 每拍清一次 graveyard（弹窗 / 重建条目的旧节点）。见 `ScheduleGraveyardSweep`。
+        parts->body->SetDeferredSweep([weakParts] {
+            const std::shared_ptr<ShellParts> locked = weakParts.lock();
+            if (locked != nullptr)
+            {
+                locked->graveyard.clear();
+            }
+        });
+    }
 
     // ---- 右侧内容区 ----
     //
@@ -1058,14 +1444,17 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
     backdropData.visible = false;
     parts->backdrop = static_cast<InkingStaticButton*>(
         parts->root->AddChild(std::make_unique<InkingStaticButton>(parts->root, backdropData)));
-    parts->backdrop->SetOnClicked([] { closePopup(); });
+    // 点遮罩**不关闭**：弹窗只由右上角那个 X 关（`golding.popup` v2 的语义）。
+    // 回调留空而不是不设——按钮就是"吃掉这一区域的点击"的那件东西，
+    // 少了它，点空白会穿到下面的顶栏 / 内容区上去。
+    parts->backdrop->SetOnClicked([] {});
 
     // 启动模式 `--collapsed`：一进来侧栏就是收起的。
     // 宿主只把命令行原样交出来，"哪种模式是什么意思"是面板自己的知识（`bootMode` 契约）。
     if (std::string(g_host.BootMode()) == "--collapsed")
     {
         parts->sidebarVisible = false;
-        applySidebarState(parts);
+        snapSidebarState(parts); // 直落：首帧不该是"正在划入"的中间态
     }
 
     // 先排一次版：内容区才有真实尺寸，页面根按它量。
@@ -1146,6 +1535,48 @@ int runReady(const golding::Host& host)
                                         parts.content->GetHeight() > 0,
                       std::to_string(parts.content != nullptr ? parts.content->GetWidth() : 0) + "x" +
                           std::to_string(parts.content != nullptr ? parts.content->GetHeight() : 0));
+
+    // 顶栏进出全屏时"占多高"会从 44 跳到 0，主体必须自己跟过去（`BodyLayer::onTick`
+    // 每拍核对一次）。能断的是"现在这一拍对得上"——启动全屏由 `--fullscreen` 覆盖，
+    // 运行期切全屏靠这条链路，少了它顶上就留一条 44px 的空白。
+    failures += check("主体顶边 = 顶栏当前高",
+                      parts.body != nullptr && static_cast<int>(parts.body->GetY()) == barHeight &&
+                          parts.body->GetHeight() + barHeight == parts.root->GetHeight(),
+                      "body.y=" + std::to_string(parts.body != nullptr ? static_cast<int>(parts.body->GetY()) : -1) +
+                          " body.h=" + std::to_string(parts.body != nullptr ? parts.body->GetHeight() : -1) +
+                          " bar=" + std::to_string(barHeight));
+
+    // Tab 绑在**窗口的全局快捷键表**上：绑不上只会表现成"按了没反应"（没有报错、
+    // 没有日志），所以在这里钉一条——查的是表里真有这个**组合**，不是"绑了几条"。
+    {
+        const inking::Shortcut tabKey = inking::Shortcut::Parse("Tab");
+        const std::uint64_t tabId = inking::InkingWindow::Instance().GetShortcuts().Find(tabKey);
+        failures += check("侧栏快捷键 Tab 已绑定", tabId != 0,
+                          "id=" + std::to_string(tabId) + " key=" + tabKey.ToString());
+    }
+
+    // 抽屉动画：手动推两拍，验证它**按时间**走（不是瞬间跳），并且精确落到目标。
+    // 放在最后并复原——自检跑过之后画面必须和跑之前一样。
+    if (parts.sidebar != nullptr)
+    {
+        const float before = parts.sidebar->CurrentWidth();
+        parts.sidebar->SnapTo(0.0f);
+        parts.sidebar->AnimateTo(static_cast<float>(kSidebarWidth));
+        parts.sidebar->AdvanceAnimation(kSidebarAnimSeconds * 0.5f);
+        const float middle = parts.sidebar->CurrentWidth();
+        parts.sidebar->AdvanceAnimation(kSidebarAnimSeconds);
+        const float ended = parts.sidebar->CurrentWidth();
+        const bool stillAnimating = parts.sidebar->IsAnimating();
+        parts.sidebar->SnapTo(before);
+        if (parts.body != nullptr)
+        {
+            parts.body->Relayout();
+        }
+        failures += check("侧栏抽屉按时间推进",
+                          middle > 0.0f && middle < static_cast<float>(kSidebarWidth) && !stillAnimating &&
+                              ended == static_cast<float>(kSidebarWidth),
+                          "mid=" + std::to_string(middle) + " end=" + std::to_string(ended));
+    }
 
     return failures;
 }
