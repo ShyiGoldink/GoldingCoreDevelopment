@@ -771,6 +771,57 @@ ShapeLayer ReadLayer(const json::Value& node, const ShapeLayer& base, float orbi
  * 失败不是错误：形状会退回哈希派生——没有 shape.json 的插件照样看得见，
  * 这正是第一版做的事（见文件头的取舍）。
  */
+/**
+ * @brief **纯函数**：一段 `shape.json` 文本 → `PluginShape`。
+ *
+ * 从 `LoadShape` 里剥出来的，就为了一件事：**能被调用、能被断言**。原来解析
+ * 与"读文件"绑在一起，自检根本无从下手（本插件此前一条断言都没有）。`hash` 由
+ * 插件名派生（`HashText`），是**入参**而不是内部去查——这样它才真是纯函数。
+ *
+ * 失败时 `out` **不动**（调用方的兜底是"退回哈希派生"，不能读到一半被写脏）。
+ */
+bool ParseShapeDocument(const std::string& text, std::uint32_t hash, PluginShape& out)
+{
+    json::Value root;
+    if (!json::Parse(text, root) || root.type != json::Value::Type::Object)
+    {
+        return false;
+    }
+
+    const float orbit = json::Float(root, "orbit", kDefaultOrbitDeg);
+    if (const json::Value* radius = root.find("radius"); radius != nullptr && radius->type == json::Value::Type::Number)
+    {
+        out.baseRadius = std::clamp(static_cast<float>(radius->number), 0.02f, 1.20f);
+        out.hasBaseRadius = true;
+    }
+
+    const json::Value* layers = root.find("layers");
+    if (layers == nullptr || layers->type != json::Value::Type::Array || layers->array.empty())
+    {
+        return false;
+    }
+
+    // 先装进临时容器：失败时 `out` 一个字节都不动（见上面的约定）。
+    std::vector<ShapeLayer> parsed;
+    for (std::size_t index = 0; index < layers->array.size() && index < 6; ++index)
+    {
+        const json::Value& node = layers->array[index];
+        if (node.type != json::Value::Type::Object)
+        {
+            continue;
+        }
+        parsed.push_back(ReadLayer(node, MakeHashLayer(hash, static_cast<int>(index)), orbit));
+    }
+    if (parsed.empty())
+    {
+        return false;
+    }
+
+    out.layers.insert(out.layers.end(), parsed.begin(), parsed.end());
+    out.fromFile = true;
+    return true;
+}
+
 bool LoadShape(const golding::Host& host, const std::string& pluginName, PluginShape& shape)
 {
     const char* dir = host.PluginDir(pluginName.c_str());
@@ -784,38 +835,7 @@ bool LoadShape(const golding::Host& host, const std::string& pluginName, PluginS
     {
         return false;
     }
-    json::Value root;
-    if (!json::Parse(text, root) || root.type != json::Value::Type::Object)
-    {
-        return false;
-    }
-
-    const float orbit = json::Float(root, "orbit", kDefaultOrbitDeg);
-    if (const json::Value* radius = root.find("radius"); radius != nullptr && radius->type == json::Value::Type::Number)
-    {
-        shape.baseRadius = std::clamp(static_cast<float>(radius->number), 0.02f, 1.20f);
-        shape.hasBaseRadius = true;
-    }
-
-    const json::Value* layers = root.find("layers");
-    if (layers == nullptr || layers->type != json::Value::Type::Array || layers->array.empty())
-    {
-        return false;
-    }
-
-    const std::uint32_t hash = HashText(pluginName.c_str());
-    for (std::size_t index = 0; index < layers->array.size() && index < 6; ++index)
-    {
-        const json::Value& node = layers->array[index];
-        if (node.type != json::Value::Type::Object)
-        {
-            continue;
-        }
-        shape.layers.push_back(ReadLayer(node, MakeHashLayer(hash, static_cast<int>(index)), orbit));
-    }
-
-    shape.fromFile = !shape.layers.empty();
-    return shape.fromFile;
+    return ParseShapeDocument(text, HashText(pluginName.c_str()), shape);
 }
 
 // ---------------------------------------------------------------------------
@@ -2039,6 +2059,90 @@ void RegisterCommands(const golding::Host& host)
 // 插件本体
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 自检
+// ---------------------------------------------------------------------------
+//
+// 本插件此前**一条断言都没有**（`Ready` 直接 `return 0`）。换解析器之前必须先有
+// 回归面，否则"换完还是不是原来那个形状"没有任何证据——所以这三条断言是
+// T-05b 的**前置**，不是顺手加的。
+namespace
+{
+
+int g_shapeFailures = 0;
+
+void shapeCheck(const char* label, bool ok, const std::string& detail)
+{
+    std::printf("[%s] spellbook.%-30s %s\n", ok ? "ok" : "FAIL", label, detail.c_str());
+    if (!ok)
+    {
+        ++g_shapeFailures;
+    }
+}
+
+int RunShapeSelfCheck()
+{
+    const std::uint32_t hash = HashText("self-check");
+
+    // 1. 完整样例：2 层 + 顶层 `orbit` / `radius`。
+    //    钉的是"每个字段都读到了"——漏一个键的表现是**静默退回默认形状**，
+    //    日志里什么都不会有。
+    {
+        const std::string text =
+            R"({"orbit":12,"radius":0.5,"layers":[{"kind":"star","radius":0.8,"lobes":7},{"kind":"ring","radius":0.3}]})";
+        PluginShape shape;
+        const bool ok = ParseShapeDocument(text, hash, shape);
+        const bool two = shape.layers.size() == 2;
+        const bool first = two && shape.layers[0].kind == LayerKind::Star &&
+                           std::fabs(shape.layers[0].radius - 0.8f) < 0.001f &&
+                           shape.layers[0].lobes == 7 &&
+                           std::fabs(shape.layers[0].orbitDeg - 12.0f) < 0.001f;
+        const bool second = two && shape.layers[1].kind == LayerKind::Ring &&
+                            std::fabs(shape.layers[1].radius - 0.3f) < 0.001f;
+        const bool base = shape.hasBaseRadius && std::fabs(shape.baseRadius - 0.5f) < 0.001f;
+        shapeCheck("shape 解析：完整样例", ok && first && second && base,
+                   "层数=" + std::to_string(shape.layers.size()) +
+                       " 第一层=" + (two && shape.layers[0].kind == LayerKind::Star ? "star" : "?") +
+                       " radius=" + (two ? std::to_string(shape.layers[0].radius) : "-"));
+    }
+
+    // 2. 只写 `kind`：其余取 `base`（哈希派生）的默认值。
+    //    这条专门钉"抽函数时把 base 的默认值抽丢"——`ReadLayer` 的第三个参数
+    //    `orbitDefault` 就是从顶层继承下来的，最容易在搬运中变成 0。
+    {
+        const std::string text = R"({"layers":[{"kind":"ring"}]})";
+        PluginShape shape;
+        const bool ok = ParseShapeDocument(text, hash, shape);
+        const bool one = shape.layers.size() == 1;
+        const bool defaults = one && shape.layers[0].kind == LayerKind::Ring &&
+                              shape.layers[0].radius == 0.0f &&
+                              std::fabs(shape.layers[0].orbitDeg - kDefaultOrbitDeg) < 0.001f &&
+                              shape.layers[0].width > 0.0f && shape.layers[0].lobes >= 2;
+        shapeCheck("shape 解析：省略字段取默认", ok && defaults,
+                   "orbit=" + (one ? std::to_string(shape.layers[0].orbitDeg) : "-") +
+                       "（应等于默认 " + std::to_string(kDefaultOrbitDeg) + "）width=" +
+                       (one ? std::to_string(shape.layers[0].width) : "-"));
+    }
+
+    // 3. 非法输入：返回 false，且 `out` **一个字节都不动**
+    //    （调用方靠"形状没被写脏"才敢退回哈希派生）。
+    {
+        const std::string text = R"({"layers": 3})";
+        PluginShape shape;
+        shape.layers.push_back(ShapeLayer{});
+        shape.fromFile = true;
+        const bool rejected = !ParseShapeDocument(text, hash, shape);
+        shapeCheck("shape 解析：非法输入不改 out",
+                   rejected && shape.layers.size() == 1 && shape.fromFile,
+                   "拒收=" + std::string(rejected ? "是" : "否") +
+                       " out 层数=" + std::to_string(shape.layers.size()) + "（应保持 1）");
+    }
+
+    return g_shapeFailures;
+}
+
+}  // namespace
+
 class SpellbookPlugin final : public golding::Plugin
 {
 public:
@@ -2072,7 +2176,7 @@ public:
         {
             host.Warn("spellbook：插件表是空的，法阵图只会画出中心");
         }
-        return 0;
+        return RunShapeSelfCheck();
     }
 };
 

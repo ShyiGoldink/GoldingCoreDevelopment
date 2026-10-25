@@ -144,42 +144,13 @@ JSON 在仓库里有**三份**读法（core 437 行 / spellbook 340 行 / appman
 
 ### T-05a spellbook 抽纯函数并立断言
 
-- **状态**：未开始
-- **落点**：`plugins/core/spellbook/src/SpellbookPlugin.cpp:683-810`（`ReadLayer` 与顶层解析）、
-  `:2068-2077`（`Ready`）
-
-**准备怎么改**
-
-spellbook 现在**一条断言都没有**（`Ready` 直接 `return 0`），所以换实现之前必须先有回归面。
-做法：把"文本 → `ShapeDoc`"抽成一个纯函数 `ParseShapeDocument(const std::string&, ShapeDoc&)`，
-`Ready` 里用两条内联样例断言。**实现暂不动**（仍用它自己那份解析器），这样 T-05b 才有
-"断言不变、实现换掉"的干净对比。
-
-**大致改动逻辑**
-
-1. 把 `:683-810` 那段"读 `layers` 数组 → 每层 `ReadLayer(node, base, orbitDefault)`"从
-   "读文件"里剥出来，文件读取只负责 `ifstream` 成 `std::string`。
-2. `ShapeDoc` 只需三样东西给断言用：层数、`orbit` 默认值、第一层的 `kind`/`radius`/`color`。
-3. `Ready` 加两条断言：
-   - 完整样例（2 层 + 顶层 `orbit`）→ 层数 2、第一层 `kind` 与 `radius` 命中；
-   - **省略字段**的样例（只写 `kind`）→ 其余取默认值（这条钉住"`base` 默认值"没在抽函数时丢掉）。
-4. 非法输入（`{"layers": 3}`）→ 返回 false 且不改 `out`。
-
-**与改动前对比**
-
-| 场景 | 改动前 | 改动后 |
-| - | - | - |
-| `shape.json` 解析结果 | 由文件读取内联完成，无法单独调用 | 纯函数可调用，**结果不变**（同一份解析器） |
-| spellbook 自检 | `Ready` 直接 `return 0`，零断言 | 3 条断言进 `Ready`，计入退出码 |
-| 文件缺失 / 空文件 | 走"按名字哈希派生"的兜底 | **不变**（兜底还在，只是解析挪了位置） |
-| 插件行为 | — | **不变**，本任务只抽函数 |
-
-**验收**：`golding_host.exe --frames=1` 输出 `[ok] spellbook.shape 解析…` 三条；退出码 0；
-`ctest --test-dir build` 8 项仍全绿。
-
-**风险与回退**：风险 = 抽函数时把"`base` 提供默认值"这条语义抽丢（`ReadLayer` 的第三个参数
-`orbitDefault` 就是从上层继承的）。第 3 条断言专门钉它。
-回退 = 纯函数只是新入口，`Ready` 那三条删掉即恢复原状。
+- T-05a spellbook 抽纯函数并立断言 — 已完成（2026-10-25：把"文本 → PluginShape"抽成纯函数
+  `ParseShapeDocument(text, hash, out)`（`hash` 由插件名派生、作为入参传入，这才是纯函数）；
+  `LoadShape` 只剩"读文件 + 转调"。失败时 `out` 一个字节都不动（先装临时容器再搬）。
+  `Ready` 从 `return 0` 改成跑三条断言并计入退出码：完整样例（2 层 + 顶层 orbit / radius）、
+  省略字段取默认（钉住 `orbitDefault` 继承没被抽丢）、非法输入拒收且不改 out。
+  三条全绿，`golding_host --frames=1` 输出 `[ok] spellbook.shape …`，build 8 项仍全绿。
+  **实现未动**，仍是它自己那份解析器——这是 T-05b 的对比基线）
 
 ---
 
@@ -287,7 +258,7 @@ spellbook 现在**一条断言都没有**（`Ready` 直接 `return 0`），所�
 | T-02 | 给 core 内部头加编译期守卫 | 0.2.1-a | 已完成 |
 | T-03 | 给 SDK 加极小 `dump`（写侧） | 0.2.1-b | 已完成 |
 | T-04 | appmanager 清单读写换共享件 | 0.2.1-b | 已完成 |
-| T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 未开始 |
+| T-05a | spellbook 抽纯函数并立断言 | 0.2.1-b | 已完成 |
 | T-05b | spellbook 换用 SDK 解析器 | 0.2.1-b | 未开始 |
 | T-06 | 文档与契约口径同步 | 0.2.1-c | 未开始 |
 
