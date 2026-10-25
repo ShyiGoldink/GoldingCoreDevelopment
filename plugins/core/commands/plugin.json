@@ -1,0 +1,11 @@
+{
+  "name": "commands",
+  "title": "命令面板",
+  "version": "0.1.0",
+  "apiVersion": 4,
+  "requires": { "plugins": ["GoldingGamestoryShell"] },
+  "provides": { "golding.commands": 1 },
+  "targets": {
+    "win64": { "lib": "bin/commands.dll" }
+  }
+}

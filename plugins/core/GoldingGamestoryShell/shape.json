@@ -1,0 +1,9 @@
+{
+  "$comment": "panel plugin: an inner blue band with teeth, sitting under the golden array.",
+  "radius": 0.44,
+  "orbit": 2.0,
+  "layers": [
+    { "kind": "ring", "width": 6.0, "color": "4a7bd0", "alpha": 0.45,
+      "marks": { "count": 36, "length": 9.0, "size": 1.0, "color": "8fb4ff", "alpha": 0.55 } }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "spellbook",
+  "title": "插件图谱",
+  "version": "0.1.0",
+  "apiVersion": 3,
+  "requires": { "plugins": ["GoldingGamestoryShell"] },
+  "needs": { "golding.popup": 1, "golding.menu": 1 },
+  "targets": {
+    "win64": { "lib": "bin/spellbook.dll" }
+  }
+}

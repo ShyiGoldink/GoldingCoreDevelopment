@@ -1,0 +1,11 @@
+{
+  "name": "appmanager",
+  "title": "程序管理",
+  "version": "0.1.0",
+  "apiVersion": 4,
+  "requires": { "plugins": ["GoldingGamestoryShell"] },
+  "needs": { "golding.navigation": 1, "golding.popup": 1 },
+  "targets": {
+    "win64": { "lib": "bin/appmanager.dll" }
+  }
+}

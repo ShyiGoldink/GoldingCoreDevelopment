@@ -22,8 +22,11 @@ if (DEFINED GOLDING_INKING_DIR AND NOT GOLDING_INKING_DIR STREQUAL "")
     set(_golding_inking_dir "${GOLDING_INKING_DIR}")
 else()
     foreach(_candidate IN ITEMS
-            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.0-win64"
+            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.1-win64"
             "$ENV{INKING_SDK_DIR}"
+            "D:/InkingUIKit/dist/inking-0.5.1-win64"
+            "C:/InkingUIKit/dist/inking-0.5.1-win64"
+            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.0-win64"
             "D:/InkingUIKit/dist/inking-0.5.0-win64"
             "C:/InkingUIKit/dist/inking-0.5.0-win64"
             "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.4.0-win64"
@@ -118,3 +121,9 @@ golding_add_host_test(bootmode --expanded --frames=1)
 # 面板自己的启动模式：侧栏一进来就是收起的。走的就是 `bootMode` 那条通道，
 # 所以这条测试同时钉住了"bootMode 在装配**之前**就交给插件"这个顺序。
 golding_add_host_test(collapsed --collapsed --frames=1)
+# 指针插件的演示模式：不读真实输入，按帧把图案与"按下"各走一遍。它同时也是
+# 唯一会真的推进指针层动画（每帧 Tick + 重画 + 移动）的测试——平常那条路要
+# 指针进窗口才会走，无头环境里永远不触发。
+# 140 帧以后是"弹窗被关闭 / 替换"那一段（关用户面板 → 重开设置 → 从按钮里
+# 再 push → 再关）。少一帧就漏掉一次真实的点击回调栈。
+golding_add_host_test(cursordemo --cursor-demo --frames=160)

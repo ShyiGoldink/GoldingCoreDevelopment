@@ -11,17 +11,39 @@
 # （`plugins/core/<name>/`、`plugins/dev/<name>/`），拿名字拼路径就是对的；
 # 等真有外部插件工程时再加一个"绝对目录"参数，那时才知道它长什么样。
 
-function(golding_add_plugin name source)
+function(golding_add_plugin name)
     set(source_dir "${CMAKE_SOURCE_DIR}/plugins/core/${name}")
-    if (ARGC GREATER 2)
-        set(source_dir "${CMAKE_SOURCE_DIR}/plugins/${ARGV2}")
+
+    # 源码与"放在哪一层"是同一个参数表：`.cpp/.cc/.cxx` 结尾的是源码，其余
+    # （例如 `dev`）是 `plugins/<它>/<name>/` 那一层。这样单文件与多文件插件
+    # 用同一个函数调用，不必再为"这个插件有两个 .cpp"加一个变体。
+    set(sources "")
+    foreach(arg IN LISTS ARGN)
+        if (arg MATCHES "\\.(cpp|cc|cxx)$")
+            list(APPEND sources "${CMAKE_SOURCE_DIR}/${arg}")
+        else()
+            set(source_dir "${CMAKE_SOURCE_DIR}/plugins/${arg}/${name}")
+        endif()
+    endforeach()
+
+    if (sources STREQUAL "")
+        message(FATAL_ERROR "golding_add_plugin(${name})：没给任何源文件")
     endif()
 
-    # 源码参数按**仓库根**相对路径写（与旧版调用点一致），这里统一补前缀：
+    # 源码参数按**仓库根**相对路径写（与旧版调用点一致），这里统一补前缀（见上）：
     # 本文件被 `plugins/CMakeLists.txt` include，`CMAKE_CURRENT_SOURCE_DIR` 是 plugins/，
     # 直接用它拼会变成 plugins/plugins/...
-    add_library(${name} SHARED "${CMAKE_SOURCE_DIR}/${source}")
+    add_library(${name} SHARED ${sources})
     target_link_libraries(${name} PRIVATE golding_sdk inking::inking)
+
+    # 与 core / 宿主同一档警告：插件是**进程内**的代码，一个未初始化变量就是
+    # 一次崩溃（没有隔离），所以"编译零警告"在插件这一层同样要当成门槛。
+    if (MSVC)
+        target_compile_options(${name} PRIVATE /W4)
+    else()
+        target_compile_options(${name} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+
     target_include_directories(${name} PRIVATE "${CMAKE_SOURCE_DIR}/plugins/common")
     set_target_properties(${name} PROPERTIES
         PREFIX ""
@@ -44,6 +66,16 @@ function(golding_add_plugin name source)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:${name}>"
                 "${runtime_dir}/bin/${name}.dll")
+
+    # `shape.json`：插件自己的法阵形状（可选）。和 plugin.json 一样是 POST_BUILD
+    # 拷的，同样要记成链接依赖，否则"改了形状却没反应"。
+    if (EXISTS "${source_dir}/shape.json")
+        set_property(TARGET ${name} APPEND PROPERTY LINK_DEPENDS "${source_dir}/shape.json")
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${source_dir}/shape.json"
+                    "${runtime_dir}/shape.json")
+    endif()
 
     if (EXISTS "${source_dir}/assets")
         add_custom_command(TARGET ${name} POST_BUILD

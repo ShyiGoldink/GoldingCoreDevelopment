@@ -1,0 +1,11 @@
+{
+  "name": "autostart",
+  "title": "开机自启动",
+  "version": "0.1.0",
+  "apiVersion": 4,
+  "requires": { "plugins": ["GoldingGamestoryShell"] },
+  "needs": { "golding.popup": 1 },
+  "targets": {
+    "win64": { "lib": "bin/autostart.dll" }
+  }
+}

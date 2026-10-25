@@ -1,0 +1,10 @@
+{
+  "$comment": "spellbook itself: the outer rune band - a 16-point sawtooth ring plus a thin circle. Cool cyan so it stands out against the golden backdrop.",
+  "radius": 0.90,
+  "orbit": 2.0,
+  "layers": [
+    { "kind": "star", "radius": 0.90, "lobes": 16, "innerRatio": 0.90, "width": 1.8, "spin": -1.5,
+      "color": "6fe3c8", "alpha": 0.95 },
+    { "kind": "ring", "width": 1.6, "color": "6fe3c8", "alpha": 0.85 }
+  ]
+}

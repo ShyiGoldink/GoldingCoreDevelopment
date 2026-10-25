@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <defs>
+    <radialGradient id="disc" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#241b2e"/>
+      <stop offset="55%" stop-color="#171220"/>
+      <stop offset="100%" stop-color="#0c0911"/>
+    </radialGradient>
+  </defs>
+  <circle cx="500" cy="500" r="495" fill="url(#disc)"/>
+  <circle cx="500" cy="500" r="480" fill="none" stroke="#6e5420" stroke-width="2"/>
+  <circle cx="500" cy="500" r="462" fill="none" stroke="#d9b45a" stroke-width="3"/>
+  <circle cx="500" cy="500" r="430" fill="none" stroke="#d9b45a" stroke-width="16" stroke-dasharray="3 13"/>
+  <circle cx="500" cy="500" r="398" fill="none" stroke="#8a6a24" stroke-width="2"/>
+  <polygon points="500.0,128.0 563.5,346.6 763.0,237.0 653.4,436.5 872.0,500.0 653.4,563.5 763.0,763.0 563.5,653.4 500.0,872.0 436.5,653.4 237.0,763.0 346.6,563.5 128.0,500.0 346.6,436.5 237.0,237.0 436.5,346.6" fill="none" stroke="#e8c979" stroke-width="4" stroke-linejoin="miter"/>
+  <polygon points="500.0,128.0 563.5,346.6 763.0,237.0 653.4,436.5 872.0,500.0 653.4,563.5 763.0,763.0 563.5,653.4 500.0,872.0 436.5,653.4 237.0,763.0 346.6,563.5 128.0,500.0 346.6,436.5 237.0,237.0 436.5,346.6" fill="none" stroke="#8a6a24" stroke-width="1.5" transform="rotate(22.5 500 500)"/>
+  <polygon points="500.0,238.0 566.0,385.7 726.9,369.0 632.0,500.0 726.9,631.0 566.0,614.3 500.0,762.0 434.0,614.3 273.1,631.0 368.0,500.0 273.1,369.0 434.0,385.7" fill="none" stroke="#f5d97a" stroke-width="3"/>
+  <polygon points="500.0,200.0 759.8,350.0 759.8,650.0 500.0,800.0 240.2,650.0 240.2,350.0" fill="none" stroke="#d9b45a" stroke-width="2" transform="rotate(180 500 500)"/>
+  <circle cx="500" cy="500" r="150" fill="none" stroke="#d9b45a" stroke-width="2"/>
+  <circle cx="500" cy="500" r="120" fill="none" stroke="#8a6a24" stroke-width="1.5"/>
+  <circle cx="500" cy="500" r="12" fill="#f5d97a"/>
+  <g stroke="#d9b45a" stroke-width="2">
+    <line x1="500" y1="380" x2="500" y2="330"/>
+    <line x1="500" y1="620" x2="500" y2="670"/>
+    <line x1="380" y1="500" x2="330" y2="500"/>
+    <line x1="620" y1="500" x2="670" y2="500"/>
+  </g>
+</svg>

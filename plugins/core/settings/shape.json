@@ -1,0 +1,25 @@
+{
+  "$comment": "settings plugin: a deliberately over-stuffed ten-layer array - teeth ring, sawtooth band, 8-point star, octagon, 12-tooth ring, 6-point star, hexagon, spoke fan, a wavy inner curve, and a custom path star. Used as a stress case for layer count.",
+  "radius": 0.84,
+  "orbit": 2.5,
+  "layers": [
+    { "kind": "ring", "width": 1.0, "color": "ff8a5c", "alpha": 0.9,
+      "marks": { "count": 120, "length": 6.0, "size": 0.8, "color": "ffb38a", "alpha": 0.6 } },
+    { "kind": "star", "radius": 0.78, "lobes": 24, "innerRatio": 0.94, "width": 1.2, "spin": -1.5,
+      "color": "ff6b6b", "alpha": 0.8 },
+    { "kind": "star", "radius": 0.70, "lobes": 8, "innerRatio": 0.44, "width": 2.4, "spin": 1.2,
+      "color": "ff6b6b", "alpha": 1.0 },
+    { "kind": "polygon", "radius": 0.62, "lobes": 8, "width": 1.6, "spin": -2.0, "color": "ffa94d", "alpha": 0.85 },
+    { "kind": "star", "radius": 0.54, "lobes": 12, "innerRatio": 0.86, "width": 1.0, "spin": 3.0,
+      "color": "ffd8a8", "alpha": 0.7 },
+    { "kind": "star", "radius": 0.46, "lobes": 6, "innerRatio": 0.5, "width": 2.0, "spin": 4.0,
+      "color": "ff8a5c", "alpha": 1.0 },
+    { "kind": "polygon", "radius": 0.36, "lobes": 6, "width": 1.2, "spin": -5.0, "color": "ffa94d", "alpha": 0.85 },
+    { "kind": "spokes", "radius": 0.28, "lobes": 12, "innerRatio": 0.4, "width": 1.0, "spin": 7.0,
+      "color": "ffd8a8", "alpha": 0.75 },
+    { "kind": "curve", "radius": 0.18, "lobes": 5, "amplitude": 0.12, "width": 1.4, "spin": -9.0,
+      "color": "ffb38a", "alpha": 0.85 },
+    { "kind": "path", "radius": 0.10, "width": 1.2, "spin": 12.0, "color": "ffe8d0", "alpha": 0.9,
+      "points": [[0, -1], [0.9, -0.3], [0.6, 0.8], [-0.6, 0.8], [-0.9, -0.3]] }
+  ]
+}
