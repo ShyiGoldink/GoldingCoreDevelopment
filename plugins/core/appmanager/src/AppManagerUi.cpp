@@ -33,6 +33,7 @@ namespace theme = inking::prefab::theme;
 using inking::ButtonData;
 using inking::ImageData;
 using inking::ImageFit;
+using inking::InkingChangeAnchor;
 using inking::InkingStaticButton;
 using inking::InkingStaticImage;
 using inking::InkingStaticLabel;
@@ -51,12 +52,35 @@ constexpr int kIconSize = 26;
 constexpr int kIconLeft = 16;
 /** 盒子高度：够放二十多行，超出的被侧栏裁掉（侧栏不开滚动）。 */
 constexpr int kSidebarBoxHeight = 1400;
-/** 页面底部那两个按钮。 */
+/** 页面底部那一排按钮：启动 / 设置，以及最左边那只小眼睛。 */
 constexpr int kStartWidth = 240;
 constexpr int kStartHeight = 64;
 constexpr int kGearSize = 64;
+/** 按钮组内部的间距 / 距内容区右边 / 距底边（都按**内容区**量，不按舞台）。 */
+constexpr int kGroupGap = 12;
+constexpr int kRightInset = 48;
+constexpr int kBottomInset = 32;
+/**
+ * 背景纯享那只眼睛：**排在「启动」左边**，跟着下面那排走。
+ *
+ * 早先贴在右上角，结果紧挨着自绘的窗口按钮（- / ×，z=200）——那一块是"标题栏"的
+ * 位置，眼睛挤在那儿既是视觉噪声，也容易被窗口按钮压住。放进这一排之后它左右都是
+ * 自己人，纯享态下又正好是唯一留下的那个按钮。
+ */
+constexpr int kEyeSize = 40;
+/** 眼睛按钮与其图标的节点名（换图标时要按名字找回那个图片节点）。 */
+constexpr const char* kEyeNodeName = "appmanager.eye";
+constexpr const char* kEyeIconNodeName = "appmanager.eye.icon";
 
 UiState g_state;
+/**
+ * 点侧栏那一行时，要不要"它已经在跑就直接进去"。
+ *
+ * 只在**自检**期间临时置 false：自检会语义点击侧栏行（验"行回调 → 选中 → 切页"整条链），
+ * 那时如果那一项恰好在跑，`SetForegroundWindow` 会把用户的桌面抢走——
+ * 自检不许有这样的副作用（`docs/APPMANAGER.md` §8 的两条纪律）。
+ */
+bool g_enterFromSidebar = true;
 /** 行 → 图标节点（换图标时直接 `LoadAsset`，不必重建行）。 */
 std::map<std::string, inking::InkingStaticImage*> g_rowIcons;
 /** 行 → 按钮（改选中色用）。 */
@@ -132,7 +156,27 @@ InkingStaticButton* createRow(const AppEntry& entry)
         return nullptr;
     }
     row->SetName(rowName);
-    row->SetOnClicked([id = entry.id] { SelectApp(id); });
+    row->SetOnClicked([id = entry.id] {
+        // 先切页面（"选中"的本义：右侧先变成这一项的介绍），再看要不要直接进它的窗口。
+        //
+        // 顺序不能反：`SelectApp` 会让面板重建页面（摘旧页、挂新页），而"切前台"会把
+        // 焦点交给别人的窗口——先切页再跳走，用户看到的是"我选了它，然后它已经在跑"，
+        // 而不是"我的窗口被抢走之后才偷偷换了页"。
+        SelectApp(id);
+        // 观测口：先记一笔"这一行真的走到了进入分支"，再决定要不要动前台。
+        // （自检点行时会关掉 `g_enterFromSidebar`，但这一步仍然会走，接线因此可断言。）
+        ++g_state.enterAttempts;
+        if (!g_enterFromSidebar)
+        {
+            return;
+        }
+        if (const AppEntry* selected = FindApp(id); selected != nullptr && !EnterRunning(*selected))
+        {
+            // 两条分支都要留一行：真机上"点了一行却没反应"时，这行就是唯一的解释
+            // （没在运行 / reuse=0 / 抢不到前台都会走到这里）。
+            std::printf("[appmanager] 侧栏：%s 没在运行（或不允许进入），只切了页面\n", id.c_str());
+        }
+    });
     g_rows[entry.id] = row;
 
     const std::filesystem::path icon = IconPath(entry);
@@ -229,6 +273,98 @@ void updateRowIcon(const AppEntry& entry)
     if (!icon.empty())
     {
         found->second->LoadAsset(ToUtf8(icon));
+    }
+}
+
+// ---- 背景纯享：藏 / 显页面上的界面层 ----
+//
+// 为什么按**名字**找节点、而且每次都从界面根找一遍：页面是"每次导航重建"的
+// （面板不缓存页面），跨页存着某个节点的裸指针，换个应用之后再点眼睛就是
+// use-after-free。名字是页面自己定的，重建后照样对得上。
+
+/** 纯享时要隐身的节点：页面根的直接孩子里属于"界面层"的那些（背景与眼睛除外）。 */
+bool isOverlayNode(const std::string& name)
+{
+    return name == "appmanager.page.plate" || name == "appmanager.page.title" ||
+           name == "appmanager.page.path" || name == "appmanager.launch" ||
+           name == "appmanager.settings";
+}
+
+inking::InkingWidget* childByName(inking::InkingWidget* parent, const std::string& name)
+{
+    if (parent == nullptr)
+    {
+        return nullptr;
+    }
+    for (inking::InkingWidget* child : parent->GetChildren())
+    {
+        if (child != nullptr && child->GetName() == name)
+        {
+            return child;
+        }
+    }
+    return nullptr;
+}
+
+/** 从界面根按名字找当前页面根；没装这一页时返回 nullptr。 */
+inking::InkingWidget* findPageRoot()
+{
+    auto* top = static_cast<inking::InkingWidget*>(g_state.host.UiRoot());
+    if (top == nullptr)
+    {
+        return nullptr;
+    }
+    // 迭代式深度优先 + 节点数上限：页面根在第 4 层（面板根 → body → 内容区 → 页面），
+    // 上限只是防呆——界面树是几百个节点，这个循环几乎零成本。
+    std::vector<inking::InkingWidget*> stack{top};
+    int visited = 0;
+    while (!stack.empty() && visited < 1024)
+    {
+        inking::InkingWidget* node = stack.back();
+        stack.pop_back();
+        ++visited;
+        if (node == nullptr)
+        {
+            continue;
+        }
+        if (node->GetName() == kPageRootNodeName)
+        {
+            return node;
+        }
+        for (inking::InkingWidget* child : node->GetChildren())
+        {
+            if (child != nullptr)
+            {
+                stack.push_back(child);
+            }
+        }
+    }
+    return nullptr;
+}
+
+/** 把纯享态落到一棵页面上（装配期用已知的根，运行期用找到的根）。 */
+void applyOverlayVisibility(inking::InkingWidget* root, bool immersive)
+{
+    if (root == nullptr)
+    {
+        return;
+    }
+    for (inking::InkingWidget* child : root->GetChildren())
+    {
+        if (child != nullptr && isOverlayNode(child->GetName()))
+        {
+            child->SetVisible(!immersive);
+        }
+    }
+    // 眼睛图标跟着换：睁眼 = 界面还在（点它进纯享），闭眼 = 已经在纯享。
+    auto* icon = static_cast<InkingStaticImage*>(childByName(childByName(root, kEyeNodeName), kEyeIconNodeName));
+    if (icon != nullptr)
+    {
+        const std::filesystem::path path = BuiltinIconPath(immersive ? "eye-off" : "eye");
+        if (!path.empty())
+        {
+            icon->LoadAsset(ToUtf8(path));
+        }
     }
 }
 
@@ -464,7 +600,8 @@ GoldingWidgetHandle createSettingsPopup(void* /*hostContext*/, void* parent)
     note.name = "appmanager.settings.note";
     note.height = 40;
     note.text = "素材复制进 apps/" + entry->id +
-                "/；启动时它已在运行就切到那个窗口，不重复开（app.ini 的 reuse=0 可关掉这个行为）。";
+                "/；点「启动」永远新开一个实例，点侧栏这一行则会在它已运行时直接进那个窗口"
+                "（app.ini 的 reuse=0 可关掉「进入」这一段）。";
     note.color = theme::kTextMuted;
     note.colorToken = "textMuted";
     note.style.fontSize = 12.0f;
@@ -611,6 +748,16 @@ GoldingWidgetHandle createSidebar(void* /*hostContext*/, void* parent)
     }
     g_state.sidebarHost = host;
 
+    // 启动模式 `--immersive`：一进来就是背景纯享（截图 / CI 要可复现的纯享画面）。
+    //
+    // 为什么在这里读 `BootMode()` 而不是 `Register`：宿主的顺序是
+    // `registerAll()` → `setBootMode()` →（装配），所以 `Register` 里读到的一直是空串。
+    // 而本函数是装配期跑的（面板 createShell 扫区域项），那时模式已经就位。
+    if (std::string(g_state.host.BootMode()) == "--immersive")
+    {
+        g_state.immersive = true;
+    }
+
     PanelData box = makePanel("appmanager.sidebar.box", kRowWidth, kSidebarBoxHeight, theme::kSurfaceSunken);
     box.layout.kind = inking::LayoutKind::Stack;
     box.layout.axis = inking::LayoutAxis::Vertical;
@@ -643,8 +790,19 @@ GoldingWidgetHandle createPage(void* /*hostContext*/, void* parent)
     }
     const int width = container->GetWidth() > 0 ? container->GetWidth() : 1920;
     const int height = container->GetHeight() > 0 ? container->GetHeight() : 1080;
+    // 舞台尺寸（设计画布）：**背景按它铺**，能看到多少由内容区裁剪决定。
+    // 为什么不按内容区量：侧栏收/展会让内容区在 1700↔1920 之间变，按内容区量的
+    // 背景一旦铺宽过就再也不会缩回来（静态节点改不了尺寸），于是收起侧栏之后
+    // 右边留一条白边。铺满舞台则两头都对——内容区只是"窗口"。
+    int stageWidth = width;
+    int stageHeight = height;
+    for (inking::InkingWidget* node = container; node != nullptr; node = node->GetParent())
+    {
+        stageWidth = node->GetWidth();
+        stageHeight = node->GetHeight();
+    }
 
-    PanelData rootData = makePanel("appmanager.page.root", width, height, theme::kSurface);
+    PanelData rootData = makePanel(kPageRootNodeName, width, height, theme::kSurface);
     auto* root = static_cast<InkingStaticPanel*>(
         container->AddChild(std::make_unique<InkingStaticPanel>(container, rootData)));
     if (root == nullptr)
@@ -672,7 +830,7 @@ GoldingWidgetHandle createPage(void* /*hostContext*/, void* parent)
         return root;
     }
 
-    addBackground(root, *entry, width, height);
+    addBackground(root, *entry, stageWidth, stageHeight);
 
     // 标题区垫一块**半透明白**：背景可能是任意深色视频 / 照片，深色标题直接压上去
     // 会看不清。卡片是背景之上、文字之下（zIndex 1 vs 2），不挡底图整体观感。
@@ -713,21 +871,80 @@ GoldingWidgetHandle createPage(void* /*hostContext*/, void* parent)
     pathText.overflow = inking::TextOverflow::Ellipsis;
     root->AddChild(std::make_unique<InkingStaticLabel>(root, pathText));
 
-    // ---- 底部按钮组：**右下角**，启动在左、设置在右 ----
+    // ---- 底部按钮组：**右下角一排**，从左到右是 眼睛 / 启动 / 设置 ----
     //
     // 与标题卡片（左上）成对角：标题不会压到按钮，按钮也不会挡住壁纸的主要内容。
-    // 底边留 32，右边留 48。
-    const int baseY = height - 96;
-    const int rightMargin = 48;
-    const int groupWidth = kStartWidth + 12 + kGearSize;
-    const int groupLeft = width - rightMargin - groupWidth;
+    //
+    // 位置用**锚点**而不是绝对坐标：内容区的宽度会随侧栏收展变（1700 ↔ 1920），
+    // 写死的 `width - 364` 只在建页面那一刻对；锚点每次现算（`InkingAnchor::GetX`），
+    // 于是"侧栏收进去 → 按钮跟着贴到新的右下角"一行代码都不用写。
+    //
+    // 自身锚点与上级锚点都取右下角 ⇒ `GetX = 内容区宽 − 自身宽 + offsetX`，
+    // 所以 offsetX 是"离右边多远"的负值；三块的横向偏移按右边界往回累加。
+    const float gearOffsetX = -static_cast<float>(kRightInset);
+    const float launchOffsetX = -(static_cast<float>(kRightInset) + kGearSize + kGroupGap);
+    const float eyeOffsetX = launchOffsetX - static_cast<float>(kStartWidth + kGroupGap);
+    const float groupOffsetY = -static_cast<float>(kBottomInset);
+    // 眼睛比另外两块矮，竖直方向按中线对齐（不以底边对齐，否则看着往下掉）。
+    const float eyeOffsetY = -(static_cast<float>(kBottomInset) + (kStartHeight - kEyeSize) / 2.0f);
+
+    // ---- 背景纯享（那只小眼睛）：这一排最左边 ----
+    //
+    // 纯享态下**它自己不隐身**——否则鼠标就再也点不到恢复入口了
+    // （`Ctrl+E` 是另一条路，但只给键盘留出口是耍赖）。所以启动 / 设置隐掉之后，
+    // 这一排只剩它一个，位置不变（锚点算的是绝对位置，不依赖兄弟）。
+    ButtonData eye;
+    eye.name = kEyeNodeName;
+    eye.width = kEyeSize;
+    eye.height = kEyeSize;
+    eye.selfAnchor = InkingChangeAnchor::RightBottom;
+    eye.traceAnchor = InkingChangeAnchor::RightBottom;
+    eye.offsetX = eyeOffsetX;
+    eye.offsetY = eyeOffsetY;
+    eye.normal.type = inking::AppearanceType::Color;
+    eye.normal.color = theme::kAccentSoft;
+    eye.hover.type = inking::AppearanceType::Color;
+    eye.hover.color = theme::kAccentSoftPressed;
+    eye.onclicked.type = inking::AppearanceType::Color;
+    eye.onclicked.color = theme::kAccent;
+    eye.hoverInheritsNormal = false;
+    eye.onclickedInheritsNormal = false;
+    eye.stroke.width = 1.0f;
+    eye.stroke.color = theme::kAccent;
+    eye.shape = inking::ShapeSpec::RoundedRect(12.0f);
+    auto* eyeButton = static_cast<InkingStaticButton*>(
+        root->AddChild(std::make_unique<InkingStaticButton>(root, eye)));
+    if (eyeButton != nullptr)
+    {
+        // 与 `Ctrl+E` 同一个落点：`ToggleImmersive` 是唯一入口。
+        eyeButton->SetOnClicked([] { ToggleImmersive(); });
+        const std::filesystem::path eyeIcon = BuiltinIconPath(g_state.immersive ? "eye-off" : "eye");
+        if (!eyeIcon.empty())
+        {
+            const int iconSize = 24;
+            ImageData image;
+            image.name = kEyeIconNodeName;
+            image.width = iconSize;
+            image.height = iconSize;
+            image.offsetX = static_cast<float>((kEyeSize - iconSize) / 2);
+            image.offsetY = static_cast<float>((kEyeSize - iconSize) / 2);
+            image.normal.type = inking::AppearanceType::Image;
+            image.normal.source = ToUtf8(eyeIcon);
+            image.normal.imageFit = ImageFit::Contain;
+            image.runtimeAsset = true;
+            image.hitPassThrough = true;
+            eyeButton->AddChild(std::make_unique<InkingStaticImage>(eyeButton, image));
+        }
+    }
 
     ButtonData launch;
     launch.name = "appmanager.launch";
     launch.width = kStartWidth;
     launch.height = kStartHeight;
-    launch.offsetX = static_cast<float>(groupLeft);
-    launch.offsetY = static_cast<float>(baseY);
+    launch.selfAnchor = InkingChangeAnchor::RightBottom;
+    launch.traceAnchor = InkingChangeAnchor::RightBottom;
+    launch.offsetX = launchOffsetX;
+    launch.offsetY = groupOffsetY;
     launch.normal.type = inking::AppearanceType::Color;
     launch.normal.color = theme::kAccentSoft;
     launch.hover.type = inking::AppearanceType::Color;
@@ -770,8 +987,10 @@ GoldingWidgetHandle createPage(void* /*hostContext*/, void* parent)
     gear.name = "appmanager.settings";
     gear.width = kGearSize;
     gear.height = kGearSize;
-    gear.offsetX = static_cast<float>(groupLeft + kStartWidth + 12);
-    gear.offsetY = static_cast<float>(baseY);
+    gear.selfAnchor = InkingChangeAnchor::RightBottom;
+    gear.traceAnchor = InkingChangeAnchor::RightBottom;
+    gear.offsetX = gearOffsetX;
+    gear.offsetY = groupOffsetY;
     gear.normal.type = inking::AppearanceType::Color;
     gear.normal.color = theme::kAccentSoft;
     gear.hover.type = inking::AppearanceType::Color;
@@ -806,6 +1025,10 @@ GoldingWidgetHandle createPage(void* /*hostContext*/, void* parent)
         }
     }
 
+    // 装配期的这一份就用**手上这个根**，不去树上找：此刻面板可能还没把旧页面摘掉，
+    // 按名字找有可能找到上一个应用的页面。
+    applyOverlayVisibility(root, g_state.immersive);
+
     return root;
 }
 
@@ -820,6 +1043,10 @@ void SelectApp(const std::string& id)
     refreshRowSelection();
     RefreshPage();
 }
+
+void SuppressEnterFromSidebar(bool suppress) { g_enterFromSidebar = !suppress; }
+
+int EnterAttemptCount() { return g_state.enterAttempts; }
 
 void RefreshPage()
 {
@@ -848,20 +1075,40 @@ void OpenSettingsPopup(const std::string& id)
     }
 }
 
-inking::InkingWidget* BackgroundNode()
+inking::InkingWidget* BackgroundNode() { return childByName(findPageRoot(), kBackgroundNodeName); }
+
+inking::InkingWidget* EyeButton() { return childByName(findPageRoot(), kEyeNodeName); }
+
+bool IsImmersive() { return g_state.immersive; }
+
+void SetImmersive(bool immersive)
 {
-    if (g_state.pageRoot == nullptr)
+    g_state.immersive = immersive;
+    applyOverlayVisibility(findPageRoot(), immersive);
+}
+
+void ToggleImmersive()
+{
+    SetImmersive(!g_state.immersive);
+    std::printf("[appmanager] 背景纯享：%s\n", g_state.immersive ? "开（只留背景）" : "关（界面回来）");
+}
+
+int VisibleOverlayCount()
+{
+    inking::InkingWidget* root = findPageRoot();
+    if (root == nullptr)
     {
-        return nullptr;
+        return 0;
     }
-    for (inking::InkingWidget* child : g_state.pageRoot->GetChildren())
+    int visible = 0;
+    for (inking::InkingWidget* child : root->GetChildren())
     {
-        if (child != nullptr && child->GetName() == kBackgroundNodeName)
+        if (child != nullptr && isOverlayNode(child->GetName()) && child->IsVisible())
         {
-            return child;
+            ++visible;
         }
     }
-    return nullptr;
+    return visible;
 }
 
 int SettingsBuildCount() { return g_settingsBuilds; }

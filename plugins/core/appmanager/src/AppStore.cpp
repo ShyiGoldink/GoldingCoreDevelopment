@@ -193,7 +193,7 @@ struct SeedSpec
     const char* id;
     const char* title;
     const char* icon;
-    /** 已在运行时要不要切到已有窗口（`explorer` 例外：它总是新开一个窗口）。 */
+    /** 点侧栏那一行时要不要进入已在运行的窗口（`explorer` 例外：只切页面）。 */
     bool reuseWindow;
     const wchar_t* targets[4];
 };
@@ -218,8 +218,8 @@ const SeedSpec kSeeds[] = {
     {"bilibili", "哔哩哔哩", "video", true,
      {L"C:\\Program Files\\bilibili\\哔哩哔哩.exe", L"%LOCALAPPDATA%\\Programs\\bilibili\\哔哩哔哩.exe",
       nullptr, nullptr}},
-    // explorer 的进程**永远在**（它就是桌面）：切前台等于切到桌面，不是用户要的，
-    // 所以这一项每次都新开一个资源管理器窗口。
+    // explorer 的进程**永远在**（它就是桌面）：点这一行不该把桌面窗口切到前台，
+    // 所以 `reuse=0` ——点它只切页面；要新窗口就点「启动」（启动永远新开）。
     {"explorer", "文件管理器", "folder", false, {L"C:\\Windows\\explorer.exe", nullptr, nullptr, nullptr}},
     {"weixin", "微信", "chat", true,
      {L"C:\\Program Files\\Tencent\\Weixin\\Weixin.exe", L"C:\\Program Files (x86)\\Tencent\\WeChat\\WeChat.exe",
@@ -747,14 +747,9 @@ int Launch(const AppEntry& entry)
         return 1;
     }
 
-    // 先试"进已有进程"：用户点的是一次启动，不是"再开一个"。
-    // 切不到（没进程 / 没主窗口 / 前台抢不到）才真的启动一个。
-    if (entry.reuseWindow && ActivateRunning(entry.target))
-    {
-        std::printf("[appmanager] 已在运行，已切到它的窗口：%s\n", entry.target.c_str());
-        return 0;
-    }
-
+    // **永远新开一个**：点两次「启动」就是两个实例。
+    // "我不想再开一个，我要回到那个窗口"这条路归侧栏点击（`EnterRunning`）——
+    // 两个动作各自一个含义，不再让同一个按钮按"有没有进程"变卦。
     const std::wstring target = FromUtf8(entry.target).wstring();
     const std::wstring parameters = FromUtf8(entry.args).wstring();
     const std::wstring workdir = FromUtf8(entry.workdir).wstring();
@@ -776,6 +771,32 @@ int Launch(const AppEntry& entry)
 int RunningInstanceCount(const std::string& exePath)
 {
     return static_cast<int>(FindProcesses(FromUtf8(exePath).wstring()).size());
+}
+
+bool CanEnterRunning(const AppEntry& entry)
+{
+    if (!entry.reuseWindow || entry.target.empty())
+    {
+        return false;
+    }
+    // 只枚举进程：这里绝不能碰前台（自检会调它，抢前台等于动用户的桌面）。
+    return RunningInstanceCount(entry.target) > 0;
+}
+
+bool EnterRunning(const AppEntry& entry)
+{
+    if (!CanEnterRunning(entry))
+    {
+        return false;
+    }
+    if (!ActivateRunning(entry.target))
+    {
+        // 有进程但抢不到前台（前台锁 / 没有主窗口）：当"没进去"，不回退到启动。
+        std::printf("[appmanager] %s 在运行，但切不到它的窗口\n", entry.title.c_str());
+        return false;
+    }
+    std::printf("[appmanager] 已进入 %s 的窗口（%s）\n", entry.title.c_str(), entry.target.c_str());
+    return true;
 }
 
 bool HasMainWindow(const std::string& exePath)

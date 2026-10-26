@@ -125,6 +125,10 @@ golding_add_host_test(bootmode --expanded --frames=1)
 # 面板自己的启动模式：侧栏一进来就是收起的。走的就是 `bootMode` 那条通道，
 # 所以这条测试同时钉住了"bootMode 在装配**之前**就交给插件"这个顺序。
 golding_add_host_test(collapsed --collapsed --frames=1)
+# 程序管理的启动模式：一进来就是"背景纯享"（除背景外界面层全部隐身）。
+# 它走的是**插件自己**解释 `--immersive` 那条路（宿主不认识这个词），
+# 顺带钉住"装配期拿到的 bootMode 不为空"。
+golding_add_host_test(immersive --immersive --frames=1)
 # 指针插件的演示模式：不读真实输入，按帧把图案与"按下"各走一遍。它同时也是
 # 唯一会真的推进指针层动画（每帧 Tick + 重画 + 移动）的测试——平常那条路要
 # 指针进窗口才会走，无头环境里永远不触发。

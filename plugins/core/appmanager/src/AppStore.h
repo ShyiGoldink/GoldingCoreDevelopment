@@ -40,10 +40,13 @@ struct AppEntry
     std::string workdir;
 
     /**
-     * 已经在跑时先**切到那个窗口**，而不是再启动一个（默认 true）。
+     * **点侧栏那一行**时，如果它已经在跑，就直接切到那个窗口（默认 true）。
      *
-     * 置 false 的是"本来就该多开 / 每次都要新窗口"的那类——`explorer.exe` 是典型：
-     * 它的进程永远在，但用户点「文件管理器」要的是一个新窗口，不是把桌面切到前台。
+     * 与「启动」按钮无关：`Launch` 现在**永远新开一个实例**（用户要的是"点两次就是两个"）。
+     * 所以这个开关管的是"侧栏点击算不算'进入'"，不是"启动要不要复用"。
+     *
+     * 置 false 的是"跳过去没有意义"的那类——`explorer.exe` 是典型：它的进程永远在，
+     * 但点「文件管理器」看的是这一页的介绍，不是把桌面窗口切到前台。
      */
     bool reuseWindow = true;
 
@@ -132,8 +135,34 @@ std::filesystem::path IconPath(const AppEntry& entry);
 /** 背景文件的绝对路径（类型为 none / 空时返回空）。 */
 std::filesystem::path BackgroundPath(const AppEntry& entry);
 
-/** 启动它。@return 0 = 成功（含"切到了已有窗口"）。 */
+/**
+ * @brief 启动它——**永远新开一个实例**。
+ *
+ * 不再"先试进已有进程"：那条路归**侧栏点击**（`EnterRunning`）。用户点两次「启动」
+ * 就该得到两个窗口，这是启动按钮的本义；"我不想再开一个"用点侧栏表达。
+ *
+ * @return 0 = 真的交出去了（`ShellExecute` 成功）；非 0 = 路径缺失 / 启动失败。
+ */
 int Launch(const AppEntry& entry);
+
+/**
+ * @brief 侧栏点击用：这个条目**能不能**进入它已经在运行的窗口。
+ *
+ * **纯判定**：只枚举进程，不激活、不抢前台，所以自检可以随便调（`ActivateRunning`
+ * 那种会真的把别人的窗口提到前面，自检里不能这么干）。
+ *
+ * 三个条件全中才为 true：`reuseWindow`（app.ini 的 `reuse=1`）、有 `target`、
+ * 真的有进程在跑。
+ */
+bool CanEnterRunning(const AppEntry& entry);
+
+/**
+ * @brief 侧栏点击用：切到它已经在运行的那个窗口。
+ *
+ * 不满足 `CanEnterRunning` / 抢不到前台都返回 false（调用方只当作"没进去"，不回退到启动：
+ * 点侧栏的意思是"看看这一项"，不是"给我开一个"）。
+ */
+bool EnterRunning(const AppEntry& entry);
 
 /**
  * @brief 这个 exe 现在有几个正在运行的实例（按**完整路径**匹配，不含本进程）。

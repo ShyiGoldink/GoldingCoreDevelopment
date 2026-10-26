@@ -22,8 +22,11 @@
 
 #include <sdk/GoldingPlugin.h>
 
+#include <input/Shortcut.h>
+#include <input/ShortcutRegistry.h>
 #include <scene/InkingScene.h>
 #include <widget/InkingWidget.h>
+#include <window/InkingWindow.h>
 
 #include <cstdio>
 #include <filesystem>
@@ -99,8 +102,9 @@ int runReady(const golding::Host& host)
 
     // 内置图标：预置表里用到的那些名字都该有文件。缺一个就会静默退化成通用图标。
     int missing = 0;
-    for (const char* name :
-         {"app", "code", "game", "terminal", "music", "video", "folder", "chat", "globe", "menu", "settings"})
+    for (const char* name : {"app",  "code", "game", "terminal", "music",      "video",
+                             "chat", "globe", "folder", "menu",    "settings",   "eye",
+                             "eye-off"})
     {
         if (appmanager::BuiltinIconPath(name).empty())
         {
@@ -144,6 +148,28 @@ int runReady(const golding::Host& host)
                       "explorer 实例=" + std::to_string(explorerProcesses));
     const bool noPhantom = !appmanager::ActivateRunning("C:\\GoldingCore\\no-such-app.exe");
     failures += check("不存在的程序不假装激活", noPhantom, "activate=false");
+
+    // 侧栏点击的判定：`reuse` 是闸门，`CanEnterRunning` 只枚举进程（不抢前台，可以随便调）。
+    // 三个条件各断一条，最后那条同时钉住"真的有进程 ⇒ 判定为可进入"。
+    {
+        appmanager::AppEntry probe;
+        probe.id = "self-check-probe";
+        probe.title = "probe";
+        probe.target = "C:\\Windows\\explorer.exe";
+        probe.reuseWindow = true;
+        const bool allowed = appmanager::CanEnterRunning(probe);
+        probe.reuseWindow = false;
+        const bool deniedWhenOff = !appmanager::CanEnterRunning(probe);
+        const bool noEnterWhenOff = !appmanager::EnterRunning(probe); // 闸门关着 ⇒ 连前台都不碰
+        probe.reuseWindow = true;
+        probe.target = "C:\\GoldingCore\\no-such-app.exe";
+        const bool deniedWhenMissing = !appmanager::CanEnterRunning(probe);
+        failures += check("侧栏：reuse=1 且有进程才进入",
+                          allowed && deniedWhenOff && noEnterWhenOff && deniedWhenMissing,
+                          std::string("进入=") + (allowed ? "是" : "否") + " 关闸=" +
+                              (deniedWhenOff ? "拒" : "漏") + " 缺程序=" +
+                              (deniedWhenMissing ? "拒" : "漏"));
+    }
 
     // 数据层：真走一遍"新建应用"（目录 + ini + 清单追加），然后原地收拾干净。
     // 用副本当容器，清单再用原表重写——自检不能给用户多加一个应用。
@@ -201,6 +227,9 @@ int runReady(const golding::Host& host)
     }
 
     // 点击链：语义点击侧栏第二行 → 选中变了 + 页面重建。走的是与真机同一条回调。
+    //
+    // 点击期间**关掉"顺带进入已有窗口"**：这条断言只验"行回调 → 选中 → 切页"，
+    // 而真机上点行会把已经在跑的程序切到前台——自检不该动用户的桌面。
     auto* root = static_cast<inking::InkingWidget*>(host.UiRoot());
     inking::InkingScene* scene = root != nullptr ? root->GetScene() : nullptr;
     if (scene != nullptr && state.apps.size() >= 2)
@@ -208,15 +237,21 @@ int runReady(const golding::Host& host)
         const std::string first = state.selectedId;
         const std::string second = state.apps[1].id;
         const int buildsBefore = state.pageBuildCount;
+        const int entersBefore = appmanager::EnterAttemptCount();
+        appmanager::SuppressEnterFromSidebar(true);
         const bool clicked = scene->Activate(("appmanager.row." + second).c_str());
         const bool switched = clicked && appmanager::State().selectedId == second;
         const bool rebuilt = state.pageBuildCount > buildsBefore;
-        failures += check("点侧栏切应用并重建页面", switched && rebuilt,
+        // 行回调必须真的走到"进入已在运行的窗口"那一段（前台动作被自检关掉了，但接线在）。
+        const bool wired = appmanager::EnterAttemptCount() > entersBefore;
+        // 复原：自检不能改变首帧的样子（先点回原来的那一项，再放开闸门）。
+        scene->Activate(("appmanager.row." + first).c_str());
+        appmanager::SuppressEnterFromSidebar(false);
+        failures += check("点侧栏切应用并重建页面", switched && rebuilt && wired,
                           "clicked=" + std::to_string(clicked ? 1 : 0) + " selected=" +
                               appmanager::State().selectedId + " builds=+" +
-                              std::to_string(state.pageBuildCount - buildsBefore));
-        // 复原：自检不能改变首帧的样子。
-        scene->Activate(("appmanager.row." + first).c_str());
+                              std::to_string(state.pageBuildCount - buildsBefore) + " 进入接线=" +
+                              (wired ? "通" : "断"));
     }
     else
     {
@@ -243,7 +278,70 @@ int runReady(const golding::Host& host)
     }
     failures += check("添加弹窗能建", importAfter > importBefore, "builds=" + std::to_string(importAfter));
 
+    // 背景纯享：走**真机那条路**——语义点击「启动」左边那只眼睛，面板派发到它的 `onClicked`。
+    //
+    // 断的是"看得见几个"，不是"调没调过函数"：可见性写错时前者会红。
+    // 第二下点击同时验了另一件事——**纯享态下那只眼睛必须还能点**，否则就只剩键盘能救。
+    {
+        const bool hasEye = appmanager::EyeButton() != nullptr;
+        const bool started = appmanager::IsImmersive();
+        appmanager::SetImmersive(false);
+        const int visibleCount = appmanager::VisibleOverlayCount();
+        const bool clicked = scene != nullptr && scene->Activate("appmanager.eye");
+        const int hiddenCount = appmanager::VisibleOverlayCount();
+        const bool backgroundAlive =
+            appmanager::BackgroundNode() == nullptr || appmanager::BackgroundNode()->IsVisible();
+        const bool clickedBack = scene != nullptr && scene->Activate("appmanager.eye");
+        const int restoredCount = appmanager::VisibleOverlayCount();
+        appmanager::SetImmersive(started); // 自检不能改变首帧的样子
+        failures += check("背景纯享：点眼睛隐身 / 再点回来",
+                          hasEye && clicked && clickedBack && visibleCount > 0 && hiddenCount == 0 &&
+                              backgroundAlive && restoredCount == visibleCount,
+                          "可见 " + std::to_string(visibleCount) + " → " + std::to_string(hiddenCount) + " → " +
+                              std::to_string(restoredCount) + "，点击 " +
+                              std::to_string(clicked ? 1 : 0) + "/" + std::to_string(clickedBack ? 1 : 0) +
+                              (backgroundAlive ? "，背景在" : "，背景没了"));
+    }
+
+    // `Ctrl+E` 绑在**窗口**的快捷键表上（与 commands 的 `Ctrl+K` 同一条路）。
+    // 绑不上只表现为"按了没反应"，所以在这里读一次表确认它真在里面。
+    {
+        bool parsed = false;
+        const inking::Shortcut key = inking::Shortcut::Parse("Ctrl+E", &parsed);
+        const std::uint64_t id =
+            parsed ? inking::InkingWindow::Instance().GetShortcuts().Find(key) : 0;
+        failures += check("纯享快捷键 Ctrl+E 已绑定", parsed && id != 0,
+                          "id=" + std::to_string(id) + " key=" + (parsed ? key.ToString() : std::string("解析失败")));
+    }
+
     return failures;
+}
+
+/**
+ * @brief 绑 `Ctrl+E`（背景纯享开关）。
+ *
+ * **只能在 `Ready` 里调**：`InkingWindow::Instance()` 是库的进程级单例，在 `Register`
+ * 里首调会把设计尺寸烘死（宿主随后 `SetDesignSize` 被拒 = 启动期硬失败）。
+ * 这是 `commands` 插件踩出来的那两条铁律之一（`docs/NOTES.md`）。
+ *
+ * 绑不上**不算失败**：`ShortcutRegistry` 先到先得，被别人占了就退回"只靠那只眼睛"，
+ * 但必须 WARN——否则表现就是"按 Ctrl+E 没反应"，代码里看不出谁动了它。
+ */
+void BindImmersiveShortcut()
+{
+    bool parsed = false;
+    const inking::Shortcut key = inking::Shortcut::Parse("Ctrl+E", &parsed);
+    if (!parsed)
+    {
+        g_host.Warn("appmanager：Ctrl+E 解析失败，背景纯享只剩「启动」左边那只眼睛");
+        return;
+    }
+    const inking::ShortcutRegistry::Id id = inking::InkingWindow::Instance().GetShortcuts().Bind(
+        key, [] { appmanager::ToggleImmersive(); }, "appmanager.immersive");
+    if (id == 0)
+    {
+        g_host.Warn("appmanager：Ctrl+E 已被占用，背景纯享只剩「启动」左边那只眼睛");
+    }
 }
 
 class AppManagerPlugin final : public golding::Plugin
@@ -292,7 +390,12 @@ public:
         return ok;
     }
 
-    int Ready(const golding::Host& host) override { return runReady(host); }
+    int Ready(const golding::Host& host) override
+    {
+        // 先绑键再跑自检：自检里要读一遍快捷键表（绑晚了那条断言必红）。
+        BindImmersiveShortcut();
+        return runReady(host);
+    }
 };
 
 } // namespace
