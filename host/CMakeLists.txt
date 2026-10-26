@@ -22,8 +22,11 @@ if (DEFINED GOLDING_INKING_DIR AND NOT GOLDING_INKING_DIR STREQUAL "")
     set(_golding_inking_dir "${GOLDING_INKING_DIR}")
 else()
     foreach(_candidate IN ITEMS
-            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.1-win64"
+            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.3-win64"
             "$ENV{INKING_SDK_DIR}"
+            "D:/InkingUIKit/dist/inking-0.5.3-win64"
+            "C:/InkingUIKit/dist/inking-0.5.3-win64"
+            "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.1-win64"
             "D:/InkingUIKit/dist/inking-0.5.1-win64"
             "C:/InkingUIKit/dist/inking-0.5.1-win64"
             "${CMAKE_SOURCE_DIR}/third_party/InkingUIKit/inking-0.5.0-win64"
