@@ -208,12 +208,62 @@ private:
 };
 
 /**
- * @brief 顶栏以下的那一条：白底 + 横向 Stack（侧栏 | 内容区），**动态档**。
+ * @brief 右侧内容区：**由主体按"剩下的宽度"直接摆**，不再是 Stack 里的一格。
+ *
+ * 为什么不用横向 Stack（`fillMain`）分配宽度：求解器的 `fillMain` 只在**剩余空间为正**
+ * 时才生效（`InkingLayoutSolver.md`：内容超出就按 Start 排、**不挤不缩**）。而每个孩子
+ * 的"期望主轴尺寸"默认就是它**当前**的宽度——内容区一旦被撑宽过，它的期望值就和
+ * 容器一样大，剩余空间算成负数，于是侧栏再展开时**宽度缩不回去**（实测：侧栏 220、
+ * 内容区仍是 1920，页面被推到画布外 220px）。
+ *
+ * 所以宽度归 `BodyLayer::SyncGeometry()` 算：`内容宽 = 主体宽 − 侧栏当前宽`，
+ * 两个都是浮点动画的即时值。本类只管"我多大、我剪子孙、我画我的底"。
+ *
+ * 为什么要 `HasSubtreeClip()`：页面装进来之后是**整块**的（背景铺满舞台、按钮贴右下角），
+ * 它会比内容区宽——溢出必须先剪掉，否则"内容区右边界"就只是一句话，
+ * 侧栏一展开就能看到页面从内容区底下露出来（这正是"两者不分开"的观感来源）。
+ */
+class ContentLayer final : public inking::InkingDynamicWidget
+{
+public:
+    ContentLayer(inking::InkingWidget* parent, const inking::AnchorData& data, std::uint32_t color)
+        : inking::InkingDynamicWidget(parent, data), _color(color)
+    {
+    }
+
+    bool HitTest(float worldX, float worldY) const override
+    {
+        const float x = GetAbsX();
+        const float y = GetAbsY();
+        return worldX >= x && worldX < x + static_cast<float>(GetWidth()) && worldY >= y &&
+               worldY < y + static_cast<float>(GetHeight());
+    }
+
+    /** 页面超出内容区的部分一律剪掉（见类注释）。 */
+    bool HasSubtreeClip() const noexcept override { return true; }
+
+protected:
+    void onRender(float pixelX, float pixelY) const override
+    {
+        const float magnification = GetMagnification() > 0.0f ? GetMagnification() : 1.0f;
+        inking::detail::fillShape(inking::detail::currentRenderer(), inking::ShapeSpec::Rect(), GetWidth(),
+                                  GetHeight(), magnification, pixelX, pixelY, inking::TransformSpec{}, _color);
+    }
+
+private:
+    std::uint32_t _color = 0xFFFFFFFFu;
+};
+
+/**
+ * @brief 顶栏以下的那一条：白底 + **手摆的「侧栏 | 内容区」两块**，动态档。
  *
  * 为什么非得是动态档：顶栏进出全屏时"它占多高"在 `kBarHeight` 与 0 之间跳，
  * **全屏下浏览器条消失那一刻，body 的 y 与高必须一起改**——而 `MenuBar` 是静态
  * 面板（`GetCurrentHeight()` 只回答"现在画面上还剩多少"，自己改不了尺寸），
  * 布局求解器又不跳过不可见项，所以只能让 body 自己按探测到的顶栏高度重摆。
+ *
+ * 为什么不用横向 Stack 排这两块：`fillMain` 只增不减（详见 `ContentLayer` 的类注释），
+ * 侧栏收展时内容区的宽度会卡在"上一次的宽度"上。所以两块几何都由 `SyncGeometry()` 写。
  *
  * 它顺带当侧栏抽屉动画的**节拍器**：本类永远有宽有高，一定在绘制列表里，
  * 而收起后的侧栏宽度是 0，靠它自己收不到动态档的 Tick。
@@ -235,6 +285,44 @@ public:
     }
 
     void SetSidebar(SideLayer* sidebar) noexcept { _sidebar = sidebar; }
+
+    /** 内容区（右侧那块）。几何由本类算，见 `SyncGeometry`。 */
+    void SetContent(ContentLayer* content) noexcept { _content = content; }
+
+    /**
+     * 把"侧栏占多宽、剩下全给内容区"落到几何上。**幂等**：没变就一个脏都不标。
+     *
+     * 三件事一起做，因为它们必须同时成立才叫"分开"：
+     *   1. 侧栏高度跟住主体（顶栏进出全屏时会变）；
+     *   2. 内容区的左边界 = 侧栏当前宽、宽度 = 主体宽 − 侧栏当前宽；
+     *   3. 内容区重排一次 → 页面根按交叉轴拉满，页面里的**锚点**再自己跟到新边界。
+     *
+     * 第 3 步是必需的：布局求解器只管"它排的直接孩子"，页面根被拉伸之后，
+     * 页面**自己**那层绝对坐标/锚点不会重新算（库的规矩：框架不做隐式重排）。
+     * 锚点位置是每次现算的（`InkingAnchor::GetX`），所以调一次 `Relayout` 就够。
+     *
+     * @return 这一步真的改了谁的几何。
+     */
+    bool SyncGeometry()
+    {
+        if (_sidebar == nullptr || _content == nullptr)
+        {
+            return false;
+        }
+        const int bodyHeight = GetHeight();
+        const int sideWidth = _sidebar->GetWidth() > 0 ? _sidebar->GetWidth() : 0;
+        const int contentWidth = GetWidth() - sideWidth > 0 ? GetWidth() - sideWidth : 0;
+
+        bool changed = false;
+        changed = _sidebar->Resize(sideWidth, bodyHeight) || changed;
+        changed = _content->ChangeOffset(static_cast<float>(sideWidth), 0.0f) || changed;
+        changed = _content->Resize(contentWidth, bodyHeight) || changed;
+        if (changed)
+        {
+            _content->Relayout();
+        }
+        return changed;
+    }
 
     /**
      * 顶栏现在占多高（`-1` = 问不出来，这帧别动）。
@@ -258,7 +346,7 @@ public:
         }
         ChangeOffset(0.0f, static_cast<float>(barHeight));
         Resize(parent->GetWidth(), parent->GetHeight() - barHeight);
-        Relayout();
+        SyncGeometry();
     }
 
     /**
@@ -295,8 +383,8 @@ protected:
         }
         if (_sidebar != nullptr && _sidebar->AdvanceAnimation(deltaSeconds))
         {
-            // 侧栏宽度变了 → 横向 Stack 要重算内容区（`fillMain` 吃剩余宽度）。
-            Relayout();
+            // 侧栏宽度变了 → 内容区的左边界与宽度都跟着变（页面在这一步重排）。
+            SyncGeometry();
         }
     }
 
@@ -310,6 +398,7 @@ protected:
 private:
     std::uint32_t _color = 0xFFFFFFFFu;
     SideLayer* _sidebar = nullptr;
+    ContentLayer* _content = nullptr;
     std::function<int()> _probe{};
     /** 清 graveyard 的钩子（由装配方装上，见 `SetDeferredSweep`）。 */
     std::function<void()> _sweep{};
@@ -331,10 +420,11 @@ struct ShellParts
     void* hostContext = nullptr;
     InkingStaticPanel* root = nullptr;
     inking::prefab::MenuBar* bar = nullptr;
-    /** 顶栏以下的那一条：横向排「侧栏 + 内容区」（动态档，见 `BodyLayer`）。 */
+    /** 顶栏以下的那一条：「侧栏 + 内容区」由它按自己的宽高摆（动态档，见 `BodyLayer`）。 */
     BodyLayer* body = nullptr;
     SideLayer* sidebar = nullptr;
-    InkingStaticPanel* content = nullptr;
+    /** 右侧内容区：几何由 `body->SyncGeometry()` 摆，不再是 Stack 里的一格。 */
+    ContentLayer* content = nullptr;
     /** 侧栏现在是展开的吗。收起 = 宽度归 0（动画走完），内容区自动吃满。 */
     bool sidebarVisible = true;
     /** 内容区当前挂着的那一页；没有页面时是 nullptr。 */
@@ -978,7 +1068,8 @@ void snapSidebarState(const std::shared_ptr<ShellParts>& parts)
     parts->sidebar->SnapTo(parts->sidebarVisible ? static_cast<float>(kSidebarWidth) : 0.0f);
     if (parts->body != nullptr)
     {
-        parts->body->Relayout();
+        // 直落之后内容区要立刻跟上（不然首帧能看到"内容区还压着侧栏"的中间态）。
+        parts->body->SyncGeometry();
     }
 }
 
@@ -1264,8 +1355,8 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
 
     // ---- 抽屉开关（≡）：顶栏最左 ----
     //
-    // 收拉**不改尺寸**（静态面板几何构造即定型），而是"改侧栏宽度 + 让主体重排"：
-    // 侧栏在横向 Stack 里，宽度归 0 之后不再占位，内容区的 `fillMain` 自动吃满。
+    // 收拉**不改尺寸**（静态面板几何构造即定型），而是"改侧栏宽度 + 让主体重算"：
+    // 侧栏宽度归 0 之后不再占位，`SyncGeometry()` 把整块宽度都给内容区。
     // 这样收起/展开都不重建任何节点，页面与输入状态原样保留。
     ButtonData toggleLook = makeBarButton("GoldingGamestoryShell.toggle", 40);
     toggleLook.text.fontSize = 18.0f; // ≡ 小字号下几乎看不清
@@ -1336,9 +1427,8 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
     bodyAnchor.height = height - barHeight;
     bodyAnchor.offsetY = static_cast<float>(barHeight);
     bodyAnchor.color = theme::kSurface;
-    bodyAnchor.layout.kind = inking::LayoutKind::Stack;
-    bodyAnchor.layout.axis = inking::LayoutAxis::Horizontal;
-    bodyAnchor.layout.gap = 0.0f;
+    // **不再用横向 Stack 分宽度**：求解器的 `fillMain` 只增不减（见 `ContentLayer` 的
+    // 类注释），侧栏一变宽内容区就缩不回去。宽度改由 `SyncGeometry()` 直接算。
     parts->body = static_cast<BodyLayer*>(
         parts->root->AddChild(std::make_unique<BodyLayer>(parts->root, bodyAnchor, theme::kSurface)));
     if (parts->body != nullptr)
@@ -1385,16 +1475,25 @@ void* createShell(void* hostContext, void* parent, const char* /*configName*/)
 
     // ---- 右侧内容区 ----
     //
-    // 宽度写 0 + `fillMain`：宽度由主体算（侧栏收/展都会变），不在这里抄一个数。
-    // 纵向 Stack：页面根按交叉轴 `Stretch` 拉满宽度（0.4.0 的默认对齐）。
-    PanelData contentData =
-        makePanel("GoldingGamestoryShell.content", 0, height - barHeight, theme::kSurface, "panelSurface");
-    contentData.layout.kind = inking::LayoutKind::Stack;
-    contentData.layout.axis = inking::LayoutAxis::Vertical;
-    contentData.layout.gap = 0.0f;
-    contentData.layoutItem.fillMain = true;
-    parts->content = static_cast<InkingStaticPanel*>(
-        parts->body->AddChild(std::make_unique<InkingStaticPanel>(parts->body, contentData)));
+    // 几何（左边界 / 宽 / 高）由 `BodyLayer::SyncGeometry()` 每次侧栏一动就算一遍，
+    // 这里不给布局规则，也不抄一个宽度。
+    //
+    // 里面那个**纵向 Stack** 是给页面用的：页面根按交叉轴 `Stretch` 拉满内容区宽度，
+    // 于是"侧栏收进去 → 页面跟着变宽"不需要页面自己写一行代码。
+    inking::AnchorData contentAnchor;
+    contentAnchor.width = width - kSidebarWidth;
+    contentAnchor.height = height - barHeight;
+    contentAnchor.offsetX = static_cast<float>(kSidebarWidth);
+    contentAnchor.color = theme::kSurface;
+    contentAnchor.layout.kind = inking::LayoutKind::Stack;
+    contentAnchor.layout.axis = inking::LayoutAxis::Vertical;
+    contentAnchor.layout.gap = 0.0f;
+    parts->content = static_cast<ContentLayer*>(
+        parts->body->AddChild(std::make_unique<ContentLayer>(parts->body, contentAnchor, theme::kSurface)));
+    parts->content->SetName("GoldingGamestoryShell.content");
+    parts->body->SetContent(parts->content);
+    // 装配期先落一次：首帧就得是"侧栏 220 | 内容区 1700"，不能等第一次动画。
+    parts->body->SyncGeometry();
 
     // ---- 区域条目：menubar 与 sidebar 各扫一遍 ----
     //
@@ -1570,12 +1669,48 @@ int runReady(const golding::Host& host)
         parts.sidebar->SnapTo(before);
         if (parts.body != nullptr)
         {
-            parts.body->Relayout();
+            parts.body->SyncGeometry();
         }
         failures += check("侧栏抽屉按时间推进",
                           middle > 0.0f && middle < static_cast<float>(kSidebarWidth) && !stillAnimating &&
                               ended == static_cast<float>(kSidebarWidth),
                           "mid=" + std::to_string(middle) + " end=" + std::to_string(ended));
+    }
+
+    // 侧栏收进去之后，内容区必须**吃掉整块**、页面也跟着变宽（"两者分开"的观测口）。
+    //
+    // 这条钉的是一个真实的回归：早先内容区靠横向 Stack 的 `fillMain` 分宽度，而求解器
+    // 只在剩余空间为正时才分——内容区被撑宽过一次之后就再也缩不回来（侧栏 220、
+    // 内容区仍 1920），页面被推到画布外，右下角那两个按钮点不到。
+    {
+        const float before = parts.sidebar != nullptr ? parts.sidebar->CurrentWidth() : 0.0f;
+        int collapsedWidth = -1;
+        int collapsedPageWidth = -1;
+        int expandedWidth = -1;
+        int expandedPageWidth = -1;
+        if (parts.sidebar != nullptr && parts.body != nullptr && parts.content != nullptr)
+        {
+            parts.sidebar->SnapTo(0.0f);
+            parts.body->SyncGeometry();
+            collapsedWidth = parts.content->GetWidth();
+            collapsedPageWidth = parts.currentPage != nullptr ? parts.currentPage->GetWidth() : -1;
+
+            parts.sidebar->SnapTo(static_cast<float>(kSidebarWidth));
+            parts.body->SyncGeometry();
+            expandedWidth = parts.content->GetWidth();
+            expandedPageWidth = parts.currentPage != nullptr ? parts.currentPage->GetWidth() : -1;
+
+            parts.sidebar->SnapTo(before); // 复原：自检不能让首帧换样
+            parts.body->SyncGeometry();
+        }
+        const bool ok = collapsedWidth == parts.root->GetWidth() &&
+                        expandedWidth == parts.root->GetWidth() - kSidebarWidth &&
+                        (parts.currentPage == nullptr ||
+                         (collapsedPageWidth == collapsedWidth && expandedPageWidth == expandedWidth));
+        failures += check("侧栏开合 → 内容区与页面一起重排", ok,
+                          "收起 content=" + std::to_string(collapsedWidth) + " page=" +
+                              std::to_string(collapsedPageWidth) + " / 展开 content=" +
+                              std::to_string(expandedWidth) + " page=" + std::to_string(expandedPageWidth));
     }
 
     return failures;

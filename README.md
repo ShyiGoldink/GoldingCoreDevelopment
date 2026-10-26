@@ -214,6 +214,12 @@ menu->open(nullptr, "my.entry", &decl);   // 在「我的入口」下面展开
 （`EaseOut`），动画期间侧栏把内容剪在自己那块里，条目不会溢到内容区上。想让程序一
 启动就收着，用 `golding_host.exe --collapsed`（`--collapsed` 由面板自己解释，宿主管不着）。
 
+内容区那一格**不靠横向 `Stack` 的 `fillMain` 分宽度**：求解器的 `fillMain` 只增不减
+（详情见 `docs/NOTES.md`），侧栏一展开内容区就缩不回去。宽度由 `BodyLayer::SyncGeometry()`
+每拍直接算，改完顺手 `Relayout()`，页面根按交叉轴拉满——于是"侧栏收进去 → 页面变宽"、
+"展开 → 页面让位并重排"。内容区还声明了 `HasSubtreeClip`：页面比它宽的部分一律剪掉，
+不会从侧栏底下露出来。
+
 `Tab` 绑在窗口的**全局快捷键表**上（`MenuBar::BindShortcut`），不依赖焦点；代价是它
 会先被消费掉，输入框拿不到 `Tab`。要改组合就改 `GoldingGamestoryShell.cpp` 里那句
 `Shortcut::Parse("Tab")`。
@@ -423,3 +429,4 @@ if (cursor != nullptr) {
 | `docs/CURSOR.md` | 用户指针的格式与用法（用户侧契约） |
 | [`docs/APPMANAGER.md`](docs/APPMANAGER.md) | 程序管理：数据格式、代码分层、时序、扩展点、已知限制（**改它之前先读**） |
 | [`docs/AUTOSTART.md`](docs/AUTOSTART.md) | 开机自启动：写什么文件、为什么用脚本、编码与状态判定 |
+| [`docs/TASK-SDK-JSON.md`](docs/TASK-SDK-JSON.md) | 任务书：把 JSON 解析器收口成 SDK 头、两个插件改用共享件（**7/7 已完成**，逐条跟踪） |
